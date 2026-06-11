@@ -4,12 +4,12 @@
 本插件（Lua 辅助码脚本与简纯皮肤）目前仅在同文输入法上测试通过，其他平台尚未验证。
 
 ## ⚠️ 使用前请注意
-使用本插件前，请确认你已使用 PRO 方案，并仔细阅读 万象方案文档 - 18键转写配置，确保已完成转写的相关配置。
+使用本插件前，请确认你已使用 PRO 方案，并仔细阅读 万象方案文档 - 18键转写配置(https://amzxyz.github.io/doc/layouts/)，确保已完成转写的相关配置。
 
 ## 📝 Lua 脚本说明
 将 lua 脚本放置在 Rime 根目录下的 lua\wanxiang 文件夹中。
 
-在 wanxiang_pro.custom.yaml 中添加以下配置（建议添加在 engine/filters 列表的适当位置）：
+在 wanxiang_pro.custom.yaml 中添加以下配置：
 
 ```yaml
 patch:

@@ -34,6 +34,6 @@ patch:
 若你基于本插件再发布，需注明来源并保留本声明。
 
 ## 🙏 致谢
-原项目：万象拼音
+原项目：[万象拼音](https://github.com/amzxyz/rime-wanxiang)
 作者：amzxyz
 许可证：CC-BY-4.0

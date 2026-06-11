@@ -1,0 +1,7 @@
+patch:
+  # 只修改下面配置中的输入方案名称，名称与wanxiang.custom.yaml保持一致，这个用于反查
+  speller/algebra:
+    __include: wanxiang_algebra:/reverse/自然码     # 继承自然码的反查规则
+    __append:
+    - xlit/qwertyuiopasdfghjklzxcvbnm/qwwrryuiipassffhjjlzxxvbbm/
+

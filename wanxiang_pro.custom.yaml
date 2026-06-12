@@ -13,4 +13,3 @@ patch:
     #下面是候选数量，未来7890分别代表1234声，请候选长度不要大于6避免冲突
   menu/page_size: 6
   engine/filters/@1: lua_filter@*wanxiang.wanxiang_18_lookup
-  wanxiang_lookup/mode: classic

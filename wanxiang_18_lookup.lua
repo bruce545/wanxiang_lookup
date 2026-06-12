@@ -2,24 +2,13 @@
 --wanxiang_lookup: #设置归属于super_lookup.lua
   --tags: [ abc ]  # 检索当前tag的候选
   --key: "`"       # 输入中反查引导符
+  --mode: classic  # 匹配模式：classic=从左到右前缀匹配；jump=右侧优先跳跃修正
   --lookup: [ wanxiang_reverse ] #反查滤镜数据库
   --data_source: [ aux, db ] # 优先级：写在前面优先。即使只写db，只要开启enable_tone也能从注释获取声调。
   --enable_tone: true  #启用声调反查
   --is_18jian: true # 可选，手动开启 18 键映射支持（如果不填，脚本也会自动从 speller/algebra 中检测 xlit 规则）
 
 local wanxiang = require("wanxiang/wanxiang")
-
--- =====================
--- 脚本内置配置区
--- =====================
--- 控制本脚本在辅码修正/联想时最多输出前几个重组候选。
--- 1 = 只输出 top1；2 = 输出 top2；3 = 输出 top3。
--- 建议不要超过 5，过大会让候选栏变乱，也会增加计算量。
-local LOOKUP_OUTPUT_TOP_N = 2
-
--- 安全上限：防止误填过大导致候选爆炸。
-local LOOKUP_OUTPUT_TOP_N_LIMIT = 10
-
 local function alt_lua_punc(s)
     return s and s:gsub('([%.%+%-%*%?%[%]%^%$%(%)%%])', '%%%1') or ''
 end
@@ -310,6 +299,42 @@ local function match_fuzzy_recursive(codes_sequence, idx, input_str, input_idx, 
     return result
 end
 
+-- classic 模式：从左到右逐字前缀匹配。
+-- 与 jump/旧 fuzzy 不同：未消耗完输入前，不允许跳过前面的字去匹配后面的字。
+local function match_classic_prefix_recursive(codes_sequence, idx, input_str, input_idx, memo, is_phrase_mode)
+    if not input_str or input_str == "" then return true end
+    if input_idx > #input_str then return true end
+    if idx > #codes_sequence then return false end
+    local state_key = idx * 1000 + input_idx
+    if memo[state_key] ~= nil then return memo[state_key] end
+
+    local codes = codes_sequence[idx]
+    local result = false
+
+    if codes then
+        for _, code in ipairs(codes) do
+            local skip = false
+            if is_phrase_mode and #code > 3 then skip = true end
+            if code:match("^%d+$") then skip = true end
+            if not skip then
+                local max_take = math.min(#code, #input_str - input_idx + 1)
+                for take = max_take, 1, -1 do
+                    if input_str:sub(input_idx, input_idx + take - 1) == code:sub(1, take) then
+                        if match_classic_prefix_recursive(codes_sequence, idx + 1, input_str, input_idx + take, memo, is_phrase_mode) then
+                            result = true
+                            break
+                        end
+                    end
+                end
+                if result then break end
+            end
+        end
+    end
+
+    memo[state_key] = result
+    return result
+end
+
 local function list_contains(list, target)
     if not list then return false end
     for _, v in ipairs(list) do if v == target then return true end end
@@ -370,6 +395,12 @@ local f = {}
 
 function f.init(env)
     local config = env.engine.schema.config
+
+    -- 匹配模式：默认 classic；在 custom 中可通过 wanxiang_lookup/mode: jump 切回旧逻辑
+    local configured_mode = config:get_string('wanxiang_lookup/mode') or config:get_string('wanxiang_lookup/match_mode') or 'classic'
+    configured_mode = tostring(configured_mode):lower()
+    if configured_mode ~= 'classic' and configured_mode ~= 'jump' then configured_mode = 'classic' end
+    env.match_mode = configured_mode
     
     -- 检测 18键 并键映射设置
     env.is_18jian = config:get_bool('wanxiang_lookup/is_18jian') or false
@@ -384,30 +415,13 @@ function f.init(env)
         end
     end
 
-    -- 并键多结果展开的性能阈值：仍从 schema 读取，用于控制内部搜索宽度。
-    -- max_route_branches：单一路线、单一步骤最多保留多少个同码候选。
-    -- max_total_variants：逐段消耗过程中最多保留多少条分支路径。
+    -- 并键多结果展开的性能阈值：可在 schema 中按需调大/调小
+    -- max_route_branches：单一路线、单一步骤最多保留多少个同码候选
+    -- max_total_variants：逐段消耗过程中最多保留多少条分支路径
+    -- max_yield_variants：最终最多输出多少个去重结果
     env.max_route_branches = safe_config_int(config, 'wanxiang_lookup/max_route_branches', 8)
     env.max_total_variants = safe_config_int(config, 'wanxiang_lookup/max_total_variants', 32)
-
-    -- 输出 top 几：直接改脚本顶部 LOOKUP_OUTPUT_TOP_N，不从 schema 读取。
-    env.output_top_n = tonumber(LOOKUP_OUTPUT_TOP_N) or 1
-    if env.output_top_n < 1 then env.output_top_n = 1 end
-    if env.output_top_n > LOOKUP_OUTPUT_TOP_N_LIMIT then env.output_top_n = LOOKUP_OUTPUT_TOP_N_LIMIT end
-
-    -- 词组联想打分：词组候选必须明显压过单字兜底，否则会表现成“一个字一个字改”。
-    env.phrase_bonus = safe_config_int(config, 'wanxiang_lookup/phrase_bonus', 8000)
-    env.phrase_len_bonus = safe_config_int(config, 'wanxiang_lookup/phrase_len_bonus', 1000)
-    env.single_char_fallback_bonus = safe_config_int(config, 'wanxiang_lookup/single_char_fallback_bonus', 800)
-
-    -- 长度分流：二字候选更偏向词组；三字及以上更偏向单字。
-    env.two_char_phrase_bonus = safe_config_int(config, 'wanxiang_lookup/two_char_phrase_bonus', 12000)
-    env.two_char_single_bonus = safe_config_int(config, 'wanxiang_lookup/two_char_single_bonus', 200)
-    env.long_phrase_bonus = safe_config_int(config, 'wanxiang_lookup/long_phrase_bonus', 1000)
-    env.long_single_char_bonus = safe_config_int(config, 'wanxiang_lookup/long_single_char_bonus', 5000)
-
-    -- 辅码逐段匹配不保存模式状态：
-    -- 每次 f.func 调用都先严格左到右；本轮左侧失败时，才临时启动右侧优先兜底。
+    env.max_yield_variants = safe_config_int(config, 'wanxiang_lookup/max_yield_variants', 32)
 
     env.enable_tone = config:get_bool('wanxiang_lookup/enable_tone')
     if env.enable_tone == nil then env.enable_tone = true end
@@ -571,9 +585,10 @@ function f.func(input, env)
     for cand in input:iter() do
         local cand_len = get_utf8_len(cand.text)
         
-        -- 【全新重写】：路线1 -> 路线1B -> 路线2，最右侧优先并逐段消耗辅码
+        -- jump 模式：路线1 -> 路线1B -> 路线2，最右侧优先并逐段消耗辅码
         if is_first_cand then
             is_first_cand = false
+            if env.match_mode == 'jump' then
             
             local syl_offset = 0
             local spans = ctx.composition:spans()
@@ -653,17 +668,7 @@ function f.func(input, env)
                 if #fuma_chunks > 0 then
                     local MAX_ROUTE_BRANCHES = env.max_route_branches or 8
                     local MAX_TOTAL_VARIANTS = env.max_total_variants or 32
-                    local OUTPUT_TOP_N = env.output_top_n or 1
-
-                    -- 本轮候选长度策略：
-                    -- 2 字：优先相信 translator 给出的二字词组联想；
-                    -- >2 字：优先按每个辅码锁定单字，避免长句被词组重组整体带偏。
-                    local prefer_phrase_for_two = (cand_len == 2)
-                    local prefer_single_for_long = (cand_len > 2)
-                    local route_phrase_bonus = prefer_phrase_for_two and (env.two_char_phrase_bonus or 12000)
-                        or (prefer_single_for_long and (env.long_phrase_bonus or 1000) or (env.phrase_bonus or 8000))
-                    local route_single_bonus = prefer_phrase_for_two and (env.two_char_single_bonus or 200)
-                        or (prefer_single_for_long and (env.long_single_char_bonus or 5000) or (env.single_char_fallback_bonus or 800))
+                    local MAX_YIELD_VARIANTS = env.max_yield_variants or 32
 
                     local function get_phrase_text(text, w_start, w_end)
                         local out = {}
@@ -806,10 +811,7 @@ function f.func(input, env)
                                                     match_count = var.match_count + phrase_len,
                                                     search_end_idx = w_start - 1,
                                                     right_fuma_idx = fuma_start - 1,
-                                                    score = (var.score or 0) + (c.quality or 0)
-                                                        + route_phrase_bonus
-                                                        + phrase_len * (env.phrase_len_bonus or 1000)
-                                                        + (is_changed and 0 or 1000)
+                                                    score = (var.score or 0) + (c.quality or 0) + (is_changed and 0 or 1000)
                                                 })
                                                 if #branches >= MAX_ROUTE_BRANCHES then break end
                                             end
@@ -855,11 +857,10 @@ function f.func(input, env)
                                 local char1 = get_utf8_char_at(c.text, 1)
                                 local char2 = get_utf8_char_at(c.text, 2)
 
-                                -- 模式A：保留旧逻辑：左变右不变，例如“星星”->“行星”。
+                                -- 模式A：左变右不变，例如“星星”->“行星”
                                 local case_a = (char2 == orig_char2) and check_char_fuma_match(env, pure_pinyin_parts[1], chunk_fuma, char1)
-                                -- 模式B：词组联想逻辑：只要右字符合当前辅码，允许左字随词组一起变化。
-                                -- 否则“行星/星形”这类二字词会被退化成单字修改。
-                                local case_b = check_char_fuma_match(env, pure_pinyin_parts[2], chunk_fuma, char2)
+                                -- 模式B：左不变右变，例如“星星”->“星形”
+                                local case_b = (char1 == orig_char1) and check_char_fuma_match(env, pure_pinyin_parts[2], chunk_fuma, char2)
 
                                 if case_a or case_b then
                                     seen_phrase[c.text] = true
@@ -869,7 +870,7 @@ function f.func(input, env)
                                         match_count = var.match_count + 1,
                                         search_end_idx = w_start - 1,
                                         right_fuma_idx = var.right_fuma_idx - 1,
-                                        score = (var.score or 0) + (c.quality or 0) + route_phrase_bonus + 2 * (env.phrase_len_bonus or 1000)
+                                        score = (var.score or 0) + (c.quality or 0)
                                     })
                                     if #branches >= MAX_ROUTE_BRANCHES then break end
                                 end
@@ -905,7 +906,7 @@ function f.func(input, env)
                                             match_count = var.match_count + 1,
                                             search_end_idx = i - 1,
                                             right_fuma_idx = var.right_fuma_idx - 1,
-                                            score = (var.score or 0) + (vc.weight or 0) + route_single_bonus
+                                            score = (var.score or 0) + (vc.weight or 0)
                                         })
                                     end
                                     return sort_and_cap_variants(branches, MAX_ROUTE_BRANCHES)
@@ -916,18 +917,176 @@ function f.func(input, env)
                         return nil
                     end
 
-                    local function branch_route1_left(var)
-                        if not env.main_translator then return nil end
-                        if var.left_fuma_idx > (#fuma_chunks - 1) or var.search_start_idx > (cand_len - 1) then return nil end
+                    -- 【总调度：路线1 -> 路线1B -> 路线2，逐段消耗辅码；同一路线的并键重码保留多分支】
+                    local variants = {{
+                        text = cand.text,
+                        corrected_count = 0,
+                        match_count = 0,
+                        search_end_idx = cand_len,
+                        right_fuma_idx = #fuma_chunks,
+                        score = 0
+                    }}
 
-                        local remain_fuma = #fuma_chunks - var.left_fuma_idx + 1
-                        local remain_chars = cand_len - var.search_start_idx + 1
-                        local max_phrase_len = math.min(remain_fuma, remain_chars)
+                    while true do
+                        local has_pending = false
+                        for _, var in ipairs(variants) do
+                            if var.right_fuma_idx > 0 then
+                                has_pending = true
+                                break
+                            end
+                        end
+                        if not has_pending then break end
 
+                        local next_variants = {}
+                        for _, var in ipairs(variants) do
+                            if var.right_fuma_idx <= 0 then
+                                table.insert(next_variants, var)
+                            else
+                                local branches = branch_route1(var)
+                                if not branches then branches = branch_route1b(var) end
+                                if not branches then branches = branch_route2(var) end
+
+                                if branches then
+                                    for _, nv in ipairs(branches) do
+                                        table.insert(next_variants, nv)
+                                    end
+                                end
+                                -- 三条路线都失败：该分支丢弃，不进入 next_variants
+                            end
+                        end
+
+                        if #next_variants == 0 then
+                            variants = {}
+                            break
+                        end
+
+                        variants = sort_and_cap_variants(next_variants, MAX_TOTAL_VARIANTS)
+                    end
+
+                    -- 最终结算上屏：输出所有完整消耗辅码的分支，去重并受 max_yield_variants 控制。
+                    local final_variants = {}
+                    local seen_texts = {}
+                    for _, var in ipairs(variants) do
+                        if var.right_fuma_idx <= 0 and var.match_count == #fuma_chunks and not seen_texts[var.text] then
+                            seen_texts[var.text] = true
+                            table.insert(final_variants, var)
+                        end
+                    end
+                    final_variants = sort_and_cap_variants(final_variants, MAX_YIELD_VARIANTS)
+
+                    local yielded_any = false
+                    for idx, var in ipairs(final_variants) do
+                        local fixed_cand = Candidate(cand.type, cand.start, cand._end, var.text, cand.comment or "")
+                        fixed_cand.quality = (cand.quality or 0) - idx * 0.001
+                        fixed_cand.preedit = cand.preedit
+                        yield(fixed_cand)
+                        yielded_any = true
+                    end
+
+                    if yielded_any then
+                        goto skip
+                    else
+                        goto skip
+                    end
+                end
+            end
+            elseif env.match_mode == 'classic' then
+                -- classic 模式：只走路线1 / 路线1B，不走路线2。
+                -- 方向从左到右：每个辅码段只能作用于当前最左侧尚未匹配的音节/词组，失败即停止该分支，避免回退到单字兜底。
+                local syl_offset = 0
+                local spans = ctx.composition:spans()
+                if spans then
+                    local vertices = type(spans.vertices) == "function" and spans:vertices() or spans.vertices
+                    if vertices then
+                        for i = 1, #vertices - 1 do
+                            if vertices[i] < cand.start then
+                                syl_offset = syl_offset + 1
+                            else
+                                break
+                            end
+                        end
+                    end
+                end
+
+                -- 双拼兜底：composition spans 没有正确拆成两码一音时，退回按 2 字母切分 pure_code
+                local function split_code_by_2(code)
+                    local parts = {}
+                    if not code or code == "" or (#code % 2 ~= 0) then return parts end
+                    for i = 1, #code, 2 do
+                        table.insert(parts, code:sub(i, i + 1):lower())
+                    end
+                    return parts
+                end
+
+                if #syllables < cand_len + syl_offset then
+                    local fallback_parts = split_code_by_2(pure_code)
+                    if #fallback_parts >= cand_len + syl_offset then
+                        syllables = fallback_parts
+                    end
+                end
+
+                if ((cand.type == 'sentence' and cand_len > 1) or (cand.type == 'phrase' and cand_len > 1)) and #syllables >= (cand_len + syl_offset) and #fuma_chunks > 0 and env.main_translator then
+                    local MAX_ROUTE_BRANCHES = env.max_route_branches or 8
+                    local MAX_TOTAL_VARIANTS = env.max_total_variants or 32
+                    local MAX_YIELD_VARIANTS = env.max_yield_variants or 32
+
+                    local function get_phrase_text(text, w_start, w_end)
+                        local out = {}
+                        for k = w_start, w_end do
+                            table.insert(out, get_utf8_char_at(text, k))
+                        end
+                        return table.concat(out)
+                    end
+
+                    local function replace_utf8_range(text, w_start, w_end, new_text)
+                        local out = {}
+                        local char_idx = 1
+                        for _, code_pt in utf8.codes(text) do
+                            if char_idx >= w_start and char_idx <= w_end then
+                                if char_idx == w_start then table.insert(out, new_text) end
+                            else
+                                table.insert(out, utf8.char(code_pt))
+                            end
+                            char_idx = char_idx + 1
+                        end
+                        return table.concat(out)
+                    end
+
+                    local function get_pinyin_window(w_start, w_end)
+                        local pure_pinyin_parts = {}
+                        for pos = w_start, w_end do
+                            local syl = syllables[pos + syl_offset]
+                            if not syl then return nil end
+                            if #syl > 2 then syl = string.sub(syl, 1, 2) end
+                            table.insert(pure_pinyin_parts, syl:lower())
+                        end
+                        return pure_pinyin_parts
+                    end
+
+                    local function sort_and_cap_variants(list, cap)
+                        table.sort(list, function(a, b)
+                            -- classic 下保留更像“原始候选”的结果：少改字优先，其次按 translator 质量。
+                            if (a.corrected_count or 0) ~= (b.corrected_count or 0) then return (a.corrected_count or 0) < (b.corrected_count or 0) end
+                            if (a.score or 0) ~= (b.score or 0) then return (a.score or 0) > (b.score or 0) end
+                            return (a.text or "") < (b.text or "")
+                        end)
+                        if #list <= cap then return list end
+                        local capped = {}
+                        for i = 1, cap do capped[i] = list[i] end
+                        return capped
+                    end
+
+                    local function branch_classic_route1(var)
+                        if var.fuma_idx > #fuma_chunks or var.search_start_idx > cand_len then return nil end
+                        local remaining_fuma = #fuma_chunks - var.fuma_idx + 1
+                        local remaining_chars = cand_len - var.search_start_idx + 1
+                        if remaining_fuma < 2 or remaining_chars < 2 then return nil end
+
+                        local max_phrase_len = math.min(remaining_fuma, remaining_chars)
                         for phrase_len = max_phrase_len, 2, -1 do
                             local w_start = var.search_start_idx
                             local w_end = w_start + phrase_len - 1
-                            local fuma_start = var.left_fuma_idx
+                            local fuma_start = var.fuma_idx
                             local pure_pinyin_parts = get_pinyin_window(w_start, w_end)
 
                             if pure_pinyin_parts then
@@ -968,11 +1127,8 @@ function f.func(input, env)
                                                     corrected_count = var.corrected_count + (is_changed and 1 or 0),
                                                     match_count = var.match_count + phrase_len,
                                                     search_start_idx = w_end + 1,
-                                                    left_fuma_idx = fuma_start + phrase_len,
-                                                    score = (var.score or 0) + (c.quality or 0)
-                                                        + route_phrase_bonus
-                                                        + phrase_len * (env.phrase_len_bonus or 1000)
-                                                        + (is_changed and 0 or 1000)
+                                                    fuma_idx = fuma_start + phrase_len,
+                                                    score = (var.score or 0) + (c.quality or 0) + (is_changed and 0 or 1000)
                                                 })
                                                 if #branches >= MAX_ROUTE_BRANCHES then break end
                                             end
@@ -988,114 +1144,51 @@ function f.func(input, env)
                         return nil
                     end
 
-                    local function branch_route1b_left(var)
-                        if var.left_fuma_idx > #fuma_chunks or var.search_start_idx > cand_len then return nil end
+                    local function branch_classic_route1b(var)
+                        if var.fuma_idx > #fuma_chunks or var.search_start_idx > cand_len - 1 then return nil end
 
-                        -- 【严格左到右前缀匹配】
-                        -- 第 n 个辅码只能绑定第 n 个尚未处理的字位；不扫描右侧、不从末尾倒推。
-                        -- 但为了 wubi`hh 能优先得到“五笔”，允许用当前二字拼音窗口重组词组：
-                        -- 当前辅码只锁定左字，右字由 translator 根据原拼音窗口补全。
                         local w_start = var.search_start_idx
-                        local w_end = math.min(w_start + 1, cand_len)
+                        local w_end = w_start + 1
                         local pure_pinyin_parts = get_pinyin_window(w_start, w_end)
                         if not pure_pinyin_parts then return nil end
 
-                        local chunk_fuma = fuma_chunks[var.left_fuma_idx]
+                        local query_str = pure_pinyin_parts[1] .. pure_pinyin_parts[2]
+                        local seg_trans = Segment(0, #query_str)
+                        seg_trans.tags = Set({"abc"})
+
+                        local ok, translation = pcall(function()
+                            return env.main_translator:query(query_str, seg_trans)
+                        end)
+                        if not ok or not translation then return nil end
+
                         local orig_char1 = get_utf8_char_at(var.text, w_start)
-                        local orig_char2 = (w_end > w_start) and get_utf8_char_at(var.text, w_end) or ""
+                        local orig_char2 = get_utf8_char_at(var.text, w_end)
                         local orig_phrase_text = orig_char1 .. orig_char2
-
-                        -- 先查“当前位置拼音 + 当前辅码”能得到哪些单字。
-                        -- 后续所有左侧分支都必须以前缀字集合为准，保证 hh 只能匹配第一个字，不会跑到第二个字去生成“无皕”。
-                        local left_char_candidates = lookup_single_char_candidates(pure_pinyin_parts[1], chunk_fuma, orig_char1)
-                        if not left_char_candidates or #left_char_candidates == 0 then return nil end
-
-                        local left_char_weight = {}
-                        for _, item in ipairs(left_char_candidates) do
-                            left_char_weight[item.char] = item.weight or 0
-                        end
-
+                        local chunk_fuma = fuma_chunks[var.fuma_idx]
                         local branches = {}
-                        local seen_text = {}
+                        local seen_phrase = {}
 
-                        -- 三字及以上：先做严格单字修正。这样“长句/长词”不会被二字词组窗口反复改偏。
-                        if prefer_single_for_long then
-                            for idx, item in ipairs(left_char_candidates) do
-                                if idx > MAX_ROUTE_BRANCHES then break end
-                                local new_text = replace_utf8_char_at(var.text, w_start, item.char)
-                                if not seen_text[new_text] then
-                                    seen_text[new_text] = true
-                                    local is_changed = (item.char ~= orig_char1)
+                        for c in translation:iter() do
+                            if get_utf8_len(c.text) == 2 and c.text ~= orig_phrase_text and not seen_phrase[c.text] then
+                                local char1 = get_utf8_char_at(c.text, 1)
+                                local char2 = get_utf8_char_at(c.text, 2)
+
+                                -- 模式A：左变右不变，例如“星星”->“行星”
+                                local case_a = (char2 == orig_char2) and check_char_fuma_match(env, pure_pinyin_parts[1], chunk_fuma, char1)
+                                -- 模式B：左不变右变，例如“星星”->“星形”
+                                local case_b = (char1 == orig_char1) and check_char_fuma_match(env, pure_pinyin_parts[2], chunk_fuma, char2)
+
+                                if case_a or case_b then
+                                    seen_phrase[c.text] = true
                                     table.insert(branches, {
-                                        text = new_text,
-                                        corrected_count = var.corrected_count + (is_changed and 1 or 0),
+                                        text = replace_utf8_range(var.text, w_start, w_end, c.text),
+                                        corrected_count = var.corrected_count + 1,
                                         match_count = var.match_count + 1,
-                                        search_start_idx = w_start + 1,
-                                        left_fuma_idx = var.left_fuma_idx + 1,
-                                        score = (var.score or 0) + (item.weight or 0) + route_single_bonus + (is_changed and 0 or 1000)
+                                        search_start_idx = w_end + 1,
+                                        fuma_idx = var.fuma_idx + 1,
+                                        score = (var.score or 0) + (c.quality or 0)
                                     })
-                                end
-                            end
-                            if #branches > 0 then return sort_and_cap_variants(branches, MAX_ROUTE_BRANCHES) end
-                        end
-
-                        -- 二字候选：优先用二字窗口重新组词，但只校验左字是否属于当前辅码候选。
-                        -- 例如 wubi`hh：translator 查询 wubi，返回“五笔”时，只要求“五”符合 wu+hh。
-                        if w_end > w_start and env.main_translator then
-                            local query_str = pure_pinyin_parts[1] .. pure_pinyin_parts[2]
-                            local seg_trans = Segment(0, #query_str)
-                            seg_trans.tags = Set({"abc"})
-
-                            local ok, translation = pcall(function()
-                                return env.main_translator:query(query_str, seg_trans)
-                            end)
-
-                            if ok and translation then
-                                for c in translation:iter() do
-                                    local phrase_text = c.text
-                                    if get_utf8_len(phrase_text) == 2 and not seen_text[phrase_text] then
-                                        local char1 = get_utf8_char_at(phrase_text, 1)
-                                        local char2 = get_utf8_char_at(phrase_text, 2)
-                                        local cw = left_char_weight[char1]
-
-
-					if cw then
-    						seen_text[phrase_text] = true
-    						local is_changed = (orig_phrase_text ~= phrase_text)
-    						local phrase_bonus = route_phrase_bonus
-    						table.insert(branches, {
-                                                text = is_changed and replace_utf8_range(var.text, w_start, w_end, phrase_text) or var.text,
-                                                corrected_count = var.corrected_count + (is_changed and 1 or 0),
-                                                match_count = var.match_count + 1,
-                                                -- 严格左到右：只消耗当前辅码和当前字位；不会从中间或末尾重定位。
-                                                search_start_idx = w_start + 1,
-                                                left_fuma_idx = var.left_fuma_idx + 1,
-                                                score = (var.score or 0) + (c.quality or 0) + cw + phrase_bonus + (is_changed and 0 or 1000)
-                                            })
-                                            if #branches >= MAX_ROUTE_BRANCHES then break end
-                                        end
-                                    end
-                                end
-                            end
-                        end
-
-                        -- 兜底：如果 translator 没有合适二字词，也至少生成“以当前辅码字开头”的结果。
-                        -- 这仍是严格左绑定，不会扫描其它位置。
-                        if #branches == 0 then
-                            for idx, item in ipairs(left_char_candidates) do
-                                if idx > MAX_ROUTE_BRANCHES then break end
-                                local new_text = replace_utf8_char_at(var.text, w_start, item.char)
-                                if not seen_text[new_text] then
-                                    seen_text[new_text] = true
-                                    local is_changed = (item.char ~= orig_char1)
-                                    table.insert(branches, {
-                                        text = new_text,
-                                        corrected_count = var.corrected_count + (is_changed and 1 or 0),
-                                        match_count = var.match_count + 1,
-                                        search_start_idx = w_start + 1,
-                                        left_fuma_idx = var.left_fuma_idx + 1,
-                                        score = (var.score or 0) + (item.weight or 0) + route_single_bonus + (is_changed and 0 or 1000)
-                                    })
+                                    if #branches >= MAX_ROUTE_BRANCHES then break end
                                 end
                             end
                         end
@@ -1104,175 +1197,76 @@ function f.func(input, env)
                         return nil
                     end
 
-                    -- 左到右流程不再定义/调用路线2；左侧路线1和路线1B失败后直接切换到右侧完整流程。
+                    local variants = {{
+                        text = cand.text,
+                        corrected_count = 0,
+                        match_count = 0,
+                        search_start_idx = 1,
+                        fuma_idx = 1,
+                        score = 0
+                    }}
 
-                    local function collect_right_variants()
-                        local variants = {{
-                            text = cand.text,
-                            corrected_count = 0,
-                            match_count = 0,
-                            search_end_idx = cand_len,
-                            right_fuma_idx = #fuma_chunks,
-                            score = 0,
-                            direction = 'right'
-                        }}
-
-                        while true do
-                            local has_pending = false
-                            for _, var in ipairs(variants) do
-                                if var.right_fuma_idx > 0 then
-                                    has_pending = true
-                                    break
-                                end
-                            end
-                            if not has_pending then break end
-
-                            local next_variants = {}
-                            for _, var in ipairs(variants) do
-                                if var.right_fuma_idx <= 0 then
-                                    table.insert(next_variants, var)
-                                else
-                                    local branches = nil
-                                    if prefer_single_for_long then
-                                        -- 三字及以上：单字精准修正优先，词组只兜底。
-                                        branches = branch_route2(var)
-                                        if not branches then branches = branch_route1b(var) end
-                                        if not branches then branches = branch_route1(var) end
-                                    else
-                                        -- 二字/普通短词：词组重组优先，单字兜底。
-                                        branches = branch_route1(var)
-                                        if not branches then branches = branch_route1b(var) end
-                                        if not branches then branches = branch_route2(var) end
-                                    end
-
-                                    if branches then
-                                        for _, nv in ipairs(branches) do
-                                            nv.direction = 'right'
-                                            table.insert(next_variants, nv)
-                                        end
-                                    end
-                                    -- 三条路线都失败：该分支丢弃，不进入 next_variants
-                                end
-                            end
-
-                            if #next_variants == 0 then
-                                variants = {}
+                    while true do
+                        local has_pending = false
+                        for _, var in ipairs(variants) do
+                            if var.fuma_idx <= #fuma_chunks then
+                                has_pending = true
                                 break
                             end
-
-                            variants = sort_and_cap_variants(next_variants, MAX_TOTAL_VARIANTS)
                         end
+                        if not has_pending then break end
 
-                        local final = {}
+                        local next_variants = {}
                         for _, var in ipairs(variants) do
-                            if var.right_fuma_idx <= 0 and var.match_count == #fuma_chunks then
-                                table.insert(final, var)
-                            end
-                        end
-                        return final
-                    end
-
-                    local function collect_left_variants()
-                        local variants = {{
-                            text = cand.text,
-                            corrected_count = 0,
-                            match_count = 0,
-                            search_start_idx = 1,
-                            left_fuma_idx = 1,
-                            score = 0,
-                            direction = 'left'
-                        }}
-
-                        while true do
-                            local has_pending = false
-                            for _, var in ipairs(variants) do
-                                if var.left_fuma_idx <= #fuma_chunks then
-                                    has_pending = true
-                                    break
-                                end
-                            end
-                            if not has_pending then break end
-
-                            local next_variants = {}
-                            for _, var in ipairs(variants) do
-                                if var.left_fuma_idx > #fuma_chunks then
-                                    table.insert(next_variants, var)
-                                else
-                                    -- 左到右只允许走路线1 -> 路线1B。
-                                    -- 一旦当前位置/当前窗口无法被这两条路线消耗，立即宣布左侧流程失败，交给右侧完整流程兜底。
-                                    local branches = nil
-                                    if prefer_single_for_long then
-                                        -- 三字及以上：先尝试当前位置单字修正；失败才允许词组兜底。
-                                        branches = branch_route1b_left(var)
-                                        if not branches then branches = branch_route1_left(var) end
-                                    else
-                                        -- 二字：词组优先。
-                                        branches = branch_route1_left(var)
-                                        if not branches then branches = branch_route1b_left(var) end
-                                    end
-
-                                    if branches then
-                                        for _, nv in ipairs(branches) do
-                                            nv.direction = 'left'
-                                            table.insert(next_variants, nv)
-                                        end
-                                    else
-                                        return {}, true
+                            if var.fuma_idx > #fuma_chunks then
+                                table.insert(next_variants, var)
+                            else
+                                local branches = branch_classic_route1(var)
+                                if not branches then branches = branch_classic_route1b(var) end
+                                -- classic 明确不走路线2：路线1/1B 都失败时，该分支直接丢弃。
+                                if branches then
+                                    for _, nv in ipairs(branches) do
+                                        table.insert(next_variants, nv)
                                     end
                                 end
                             end
-
-                            if #next_variants == 0 then
-                                return {}, true
-                            end
-
-                            variants = sort_and_cap_variants(next_variants, MAX_TOTAL_VARIANTS)
                         end
 
-                        local final = {}
-                        for _, var in ipairs(variants) do
-                            if var.left_fuma_idx > #fuma_chunks and var.match_count == #fuma_chunks then
-                                table.insert(final, var)
-                            end
+                        if #next_variants == 0 then
+                            variants = {}
+                            break
                         end
-                        return final, false
+
+                        variants = sort_and_cap_variants(next_variants, MAX_TOTAL_VARIANTS)
                     end
 
-                    -- 【总调度】：本轮计算先严格左到右前缀匹配。
-                    -- 左侧第 n 个辅码只匹配第 n 个字位；左侧失败时，本轮临时启动右侧优先兜底。
-                    -- 不在 env 中保存“已切右侧”状态，所以用户回退/改字后会重新从左侧判断。
-                    local final_variants, left_failed = collect_left_variants()
+                    local final_variants = {}
+                    local seen_texts = {}
+                    for _, var in ipairs(variants) do
+                        if var.fuma_idx > #fuma_chunks and var.match_count == #fuma_chunks and not seen_texts[var.text] then
+                            seen_texts[var.text] = true
+                            table.insert(final_variants, var)
+                        end
+                    end
+                    final_variants = sort_and_cap_variants(final_variants, MAX_YIELD_VARIANTS)
 
-                    if left_failed or #final_variants == 0 then
-                        final_variants = collect_right_variants()
+                    local yielded_any = false
+                    for idx, var in ipairs(final_variants) do
+                        local fixed_cand = Candidate(cand.type, cand.start, cand._end, var.text, cand.comment or "")
+                        fixed_cand.quality = (cand.quality or 0) - idx * 0.001
+                        fixed_cand.preedit = cand.preedit
+                        yield(fixed_cand)
+                        yielded_any = true
                     end
 
-                    -- 运算阶段保留多分支参与竞争；显示阶段按脚本顶部 LOOKUP_OUTPUT_TOP_N 输出前 N 个结果。
-                    final_variants = sort_and_cap_variants(final_variants, MAX_TOTAL_VARIANTS)
-                    if #final_variants > 0 then
-                        local yielded_count = 0
-                        local yielded_text = {}
-                        for _, best_var in ipairs(final_variants) do
-                            if best_var and best_var.text and not yielded_text[best_var.text] then
-                                yielded_text[best_var.text] = true
-                                local fixed_cand = Candidate(cand.type, cand.start, cand._end, best_var.text, cand.comment or "")
-                                -- 保持综合分高的重组候选排在前面。
-                                fixed_cand.quality = (cand.quality or 0) + ((best_var.score or 0) / 10000) - (yielded_count * 0.0001)
-                                fixed_cand.preedit = cand.preedit
-                                yield(fixed_cand)
-                                yielded_count = yielded_count + 1
-                                if yielded_count >= OUTPUT_TOP_N then break end
-                            end
-                        end
-                        goto skip
-                    else
+                    if yielded_any then
                         goto skip
                     end
                 end
-            end
+            end -- env.match_mode
         end
 
-        if cand.type == 'sentence' then goto skip end
+        if cand.type == 'sentence' and env.match_mode == 'jump' then goto skip end
         local cand_text = cand.text
         if not cand_len or cand_len == 0 then goto skip end
         local b = string.byte(cand_text, 1)
@@ -1358,14 +1352,22 @@ function f.func(input, env)
                             if group_match(codes_seq[1], clean_fuma) then is_match = true end
                         else
                             local memo = {}
-                            if match_fuzzy_recursive(codes_seq, 1, clean_fuma, 1, memo, false) then is_match = true end
+                            if env.match_mode == 'classic' then
+                                if match_classic_prefix_recursive(codes_seq, 1, clean_fuma, 1, memo, false) then is_match = true end
+                            else
+                                if match_fuzzy_recursive(codes_seq, 1, clean_fuma, 1, memo, false) then is_match = true end
+                            end
                         end
                     elseif source_type == 'db' then
                         if cand_len == 1 then
                              if group_match(codes_seq[1], clean_fuma) then is_match = true end
                         else
                              local memo = {}
-                             if match_fuzzy_recursive(codes_seq, 1, clean_fuma, 1, memo, true) then is_match = true end
+                             if env.match_mode == 'classic' then
+                                 if match_classic_prefix_recursive(codes_seq, 1, clean_fuma, 1, memo, true) then is_match = true end
+                             else
+                                 if match_fuzzy_recursive(codes_seq, 1, clean_fuma, 1, memo, true) then is_match = true end
+                             end
                         end
                     end
                     
@@ -1379,7 +1381,7 @@ function f.func(input, env)
 
         if is_match_any then
             has_any_match = true
-            if if_single_char_first and cand_len > 1 then table.insert(long_word_cands, cand)
+            if if_single_char_first and env.match_mode ~= 'classic' and cand_len > 1 then table.insert(long_word_cands, cand)
             else
                 if not buckets[cand_len] then buckets[cand_len] = {} end
                 table.insert(buckets[cand_len], cand)
@@ -1389,7 +1391,7 @@ function f.func(input, env)
         ::skip::
     end
 
-    if if_single_char_first then
+    if if_single_char_first and env.match_mode ~= 'classic' then
         if buckets[1] then for _, c in ipairs(buckets[1]) do yield(c) end end
         for l = max_len, 2, -1 do
             if buckets[l] then for _, c in ipairs(buckets[l]) do yield(c) end end

@@ -15,22 +15,6 @@
 patch:
   engine/filters/@1: lua_filter@*wanxiang.wanxiang_18_lookup
 ```
-## 🔧 功能说明
-支持两种辅筛方式：
-
-**前缀辅筛**：默认。从左侧第一个字开始，从左至右依次输入辅码。在 wanxiang_pro.custom.yaml 中配置为：
-
-```yaml
-patch:
-  wanxiang_lookup/mode: classic
-```
-
-**跳跃辅筛**：从出错的第一个字开始，输入辅码直到该部分完全正确，之后可跳跃至下一个出错的位置重复该过程，直至完全正确。在 wanxiang_pro.custom.yaml 中配置为：
-
-```yaml
-patch:
-  wanxiang_lookup/mode: jump
-```
 
 ## 🎨 皮肤说明
 为方便英文输入，皮肤提供了两种切换方式：

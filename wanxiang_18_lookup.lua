@@ -2,7 +2,7 @@
 --wanxiang_lookup: #设置归属于super_lookup.lua
   --tags: [ abc ]  # 检索当前tag的候选
   --key: "`"       # 输入中反查引导符
-  --mode: classic  # 匹配模式：classic=从左到右前缀匹配；jump=右侧优先跳跃修正
+  --mode: classic  # 匹配模式：classic=从左到右前缀匹配+路线1/1B；jump=右侧优先跳跃修正
   --lookup: [ wanxiang_reverse ] #反查滤镜数据库
   --data_source: [ aux, db ] # 优先级：写在前面优先。即使只写db，只要开启enable_tone也能从注释获取声调。
   --enable_tone: true  #启用声调反查
@@ -401,6 +401,8 @@ function f.init(env)
     configured_mode = tostring(configured_mode):lower()
     if configured_mode ~= 'classic' and configured_mode ~= 'jump' then configured_mode = 'classic' end
     env.match_mode = configured_mode
+    -- 注意：mode 只决定修正方向。普通 aux/db 过滤是否参与仍由 wanxiang_lookup/data_source 决定；
+    -- char_priority 仍由 scheme/context option 决定，不在 classic 中强行改写。
     
     -- 检测 18键 并键映射设置
     env.is_18jian = config:get_bool('wanxiang_lookup/is_18jian') or false
@@ -580,6 +582,64 @@ function f.func(input, env)
         for _, v in ipairs(env.history_parts) do table.insert(syllables, v) end
     else
         syllables = get_script_text_parts(ctx, env.search_key_str)
+    end
+
+    -- classic 模式原词前缀检查工具：仅用于辅助判断，不强行覆盖 scheme 的 aux/db 与 char_priority 行为。
+    local function get_syl_offset_for_cand(cand_start)
+        local syl_offset = 0
+        local spans = ctx.composition:spans()
+        if spans then
+            local vertices = type(spans.vertices) == "function" and spans:vertices() or spans.vertices
+            if vertices then
+                for i = 1, #vertices - 1 do
+                    if vertices[i] < cand_start then
+                        syl_offset = syl_offset + 1
+                    else
+                        break
+                    end
+                end
+            end
+        end
+        return syl_offset
+    end
+
+    local function split_code_by_2_for_classic(code)
+        local parts = {}
+        if not code or code == "" or (#code % 2 ~= 0) then return parts end
+        for i = 1, #code, 2 do
+            table.insert(parts, code:sub(i, i + 1):lower())
+        end
+        return parts
+    end
+
+    local function get_syllables_for_classic(cand_len, syl_offset)
+        local parts = syllables
+        if #parts < cand_len + syl_offset then
+            local fallback_parts = split_code_by_2_for_classic(pure_code)
+            if #fallback_parts >= cand_len + syl_offset then
+                parts = fallback_parts
+            end
+        end
+        return parts
+    end
+
+    local function classic_original_prefix_match(cand_text, cand_len, syl_offset)
+        if #fuma_chunks == 0 then return true end
+        if #fuma_chunks > cand_len then return false end
+        local parts = get_syllables_for_classic(cand_len, syl_offset)
+        if #parts < #fuma_chunks + syl_offset then return false end
+
+        for pos = 1, #fuma_chunks do
+            local syl = parts[pos + syl_offset]
+            if not syl then return false end
+            if #syl > 2 then syl = string.sub(syl, 1, 2) end
+            syl = syl:lower()
+            local ch = get_utf8_char_at(cand_text, pos)
+            if not check_char_fuma_match(env, syl, fuma_chunks[pos], ch) then
+                return false
+            end
+        end
+        return true
     end
 
     for cand in input:iter() do
@@ -991,8 +1051,8 @@ function f.func(input, env)
                 end
             end
             elseif env.match_mode == 'classic' then
-                -- classic 模式：只走路线1 / 路线1B，不走路线2。
-                -- 方向从左到右：每个辅码段只能作用于当前最左侧尚未匹配的音节/词组，失败即停止该分支，避免回退到单字兜底。
+                -- classic 模式：首候选修正只走路线1 / 路线1B，不走路线2。
+                -- 普通 aux/db 过滤仍按 data_source 配置继续参与；排序仍按 char_priority 配置执行。
                 local syl_offset = 0
                 local spans = ctx.composition:spans()
                 if spans then
@@ -1269,6 +1329,7 @@ function f.func(input, env)
         if cand.type == 'sentence' and env.match_mode == 'jump' then goto skip end
         local cand_text = cand.text
         if not cand_len or cand_len == 0 then goto skip end
+
         local b = string.byte(cand_text, 1)
         if b and b < 128 then goto skip end
 
@@ -1381,7 +1442,7 @@ function f.func(input, env)
 
         if is_match_any then
             has_any_match = true
-            if if_single_char_first and env.match_mode ~= 'classic' and cand_len > 1 then table.insert(long_word_cands, cand)
+            if if_single_char_first and cand_len > 1 then table.insert(long_word_cands, cand)
             else
                 if not buckets[cand_len] then buckets[cand_len] = {} end
                 table.insert(buckets[cand_len], cand)
@@ -1391,7 +1452,7 @@ function f.func(input, env)
         ::skip::
     end
 
-    if if_single_char_first and env.match_mode ~= 'classic' then
+    if if_single_char_first then
         if buckets[1] then for _, c in ipairs(buckets[1]) do yield(c) end end
         for l = max_len, 2, -1 do
             if buckets[l] then for _, c in ipairs(buckets[l]) do yield(c) end end

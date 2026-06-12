@@ -15,7 +15,7 @@ local wanxiang = require("wanxiang/wanxiang")
 -- 控制本脚本在辅码修正/联想时最多输出前几个重组候选。
 -- 1 = 只输出 top1；2 = 输出 top2；3 = 输出 top3。
 -- 建议不要超过 5，过大会让候选栏变乱，也会增加计算量。
-local LOOKUP_OUTPUT_TOP_N = 1
+local LOOKUP_OUTPUT_TOP_N = 2
 
 -- 安全上限：防止误填过大导致候选爆炸。
 local LOOKUP_OUTPUT_TOP_N_LIMIT = 10

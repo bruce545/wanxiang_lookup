@@ -1,5 +1,5 @@
 # 万象转写方案辅助码辅筛脚本（super_lookup）
-本仓库是基于 [万象拼音方案](https://github.com/amzxyz/rime-wanxiang)（作者：amzxyz）的派生作品。理论上可以拓展为14键方案。
+本仓库是基于 [万象拼音方案](https://github.com/amzxyz/rime-wanxiang)（作者：amzxyz）的派生作品。可以自适应匹配万象26/18/14/9键方案。
 原项目采用 CC-BY-4.0 许可证。
 本插件（Lua 辅助码脚本与简纯皮肤）目前仅在同文输入法上测试通过，其他平台尚未验证。
 

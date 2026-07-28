@@ -13,7 +13,7 @@
 
 ```yaml
 patch:
-  engine/filters/@1: lua_filter@*wanxiang.wanxiang_18_lookup
+  engine/filters/@1: lua_filter@*wanxiang.my_lookup
 ```
 
 ## 🎨 皮肤说明

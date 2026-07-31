@@ -1,17 +1,6 @@
---@amzxyz https://github.com/amzxyz/rime-wanxiang
---wanxiang_lookup: #设置归属于super_lookup.lua
---tags: [ abc ]  # 检索当前tag的候选
---key: "`"       # 输入中反查引导符
---lookup: [ wanxiang_reverse ] #反查滤镜数据库
---data_source: [ aux, db ] # 优先级：写在前面优先。即使只写db，只要开启enable_tone也能从注释获取声调。
---enable_tone: true  #启用声调反查
---enable_direct: true  #启用无引导的直接辅助码反查
---并键方案仅自动读取最终 speller/algebra；无需也不支持额外手动配置
---performance_cache: 内置查询级缓存，不改变二字/三字词保护与匹配顺序
 
 local wanxiang = require("wanxiang/wanxiang")
 
--- 1. 基础工具函数 (UTF8处理 / 字符串 / 声调)
 local function alt_lua_punc(s)
     if not s then
         return ""
@@ -19,30 +8,6 @@ local function alt_lua_punc(s)
     return s:gsub("([%.%+%-%*%?%[%]%^%$%(%)%%])", "%%%1")
 end
 
-
--- 通用并键支持（仅自动模式）
---
--- 用户方案通常通过下列方式引用万象代数预设：
---
--- patch:
---   speller/algebra:
---     __patch:
---       - wanxiang_algebra:/base/全拼
---       - wanxiang_algebra:/18jian
---
--- Rime 完成配置合并后，Lua 运行时读取到的 speller/algebra 已经是展开后的实际规则。
--- 本脚本只扫描这个最终规则列表，自动寻找覆盖完整字母键盘的压缩 xlit，例如：
---
---   xlit/qwertyuiopasdfghjklzxcvbnm/qwwrryuiipassffhjjlzxxvbbm
---
--- 若换成 /14jian 或其他并键预设，只要最终代数中包含同类完整键盘 xlit，
--- 就会自动生成“底层键 -> 并键”和“并键 -> 多个底层键”的双向映射。
--- 找不到并键规则时自动按普通 26 键运行。
---
--- 不再读取：
---   wanxiang_lookup/key_merge_source
---   wanxiang_lookup/key_merge_target
---   wanxiang_lookup/is_18jian
 local KEY_MERGE_EXPAND_LIMIT = 512
 
 local function count_distinct_ascii_letters(s)
@@ -100,9 +65,6 @@ local function parse_xlit_mapping_rule(rule)
         return nil, nil
     end
 
-    -- 万象 algebra 中的并键规则通常没有结尾斜杠，例如：
-    -- xlit/qwertyuiopasdfghjklzxcvbnm/qwwrryuiipassffhjjlzxxvbbm
-    -- 同时兼容传统的 xlit/source/target/ 写法。
     local source, target = rule:match("^%s*xlit/([^/]*)/([^/]*)/?%s*$")
     if not source or not target or source == "" or #source ~= #target then
         return nil, nil
@@ -121,8 +83,6 @@ local function is_likely_key_merge_mapping(source, target)
     local source_keys = count_distinct_ascii_letters(source)
     local target_keys = count_distinct_ascii_letters(target)
 
-    -- 排除声调、声母等短 xlit。键盘并键规则应覆盖绝大多数英文字母，
-    -- 且目标实际按键数必须少于源按键数。
     return source_keys >= 20 and target_keys < source_keys
 end
 
@@ -178,7 +138,6 @@ local function expand_key_merge_to_base(s, reverse_map, max_variants)
 end
 
 local function detect_key_merge_from_algebra(config)
-    -- __patch 引用的 wanxiang_algebra:/18jian 等预设，在运行时已经展开到这里。
     local algebra = config:get_list("speller/algebra")
     if not algebra or algebra.size == 0 then
         return false, nil, nil, nil, nil, "disabled"
@@ -199,8 +158,6 @@ local function detect_key_merge_from_algebra(config)
             local target_keys = count_distinct_ascii_letters(target)
             local reduction = source_keys - target_keys
 
-            -- 优先覆盖字母更多、压缩程度更大的规则；完全相同时采用列表中靠后的规则，
-            -- 与 __patch 后追加特殊键盘布局的常见配置方式一致。
             if source_keys > best_source_keys
                 or (source_keys == best_source_keys and reduction > best_reduction)
                 or (source_keys == best_source_keys and reduction == best_reduction and i > best_index)
@@ -226,7 +183,6 @@ local function detect_key_merge_from_algebra(config)
     return true, forward, reverse, best_source, best_target, "auto_algebra"
 end
 
--- 匹配缓存参数。只缓存查询结果，不改变任何匹配范围、顺序或评分规则。
 local SINGLE_PROBE_CACHE_MAX = 2048
 local LOCAL_QUERY_CACHE_MAX = 512
 
@@ -315,7 +271,6 @@ local function get_utf8_char_at(text, idx)
     return ""
 end
 
--- 提取一段 UTF8 字符片段
 local function get_utf8_string_range(text, start_idx, end_idx)
     local chars = {}
     local i = 1
@@ -331,7 +286,6 @@ local function get_utf8_string_range(text, start_idx, end_idx)
     return table.concat(chars)
 end
 
--- 将 UTF8 字符串转为字符数组
 local function text_to_chars(text)
     if not text or text == "" then
         return {}
@@ -343,12 +297,10 @@ local function text_to_chars(text)
     return chars
 end
 
--- 将字符数组拼回字符串
 local function chars_to_text(chars)
     return table.concat(chars)
 end
 
--- 替换一段 UTF8 字符片段
 local function replace_text_range(current_text, start_idx, end_idx, new_str)
     local out = {}
     local char_idx = 1
@@ -377,7 +329,6 @@ local function list_contains(list, target)
     return false
 end
 
--- 2. 核心解析逻辑 (输入拆分 / 辅码提取 / 音节切分)
 local function split_lookup_input(input, key, bypass_prefix)
     if not input or input == "" or not key or key == "" then
         return nil
@@ -414,7 +365,6 @@ local function split_lookup_input(input, key, bypass_prefix)
     return input:sub(1, s_start - 1), input:sub(s_end + 1), s_start, s_end
 end
 
--- 解析输入的辅码，仅将 7,8,9,0 视为声调，其余为常规辅码
 local function parse_fuma_rules(fuma)
     local tone_filter_seq = {}
     local fuma_chunks = {}
@@ -531,7 +481,6 @@ local function get_script_text_parts(ctx, reverse_key)
     return parts
 end
 
--- 3. 数据库反查与展开算法 (Algebra/Projection)
 local function parse_and_separate_rules(schema_id)
     if not schema_id or #schema_id == 0 then
         return nil, nil
@@ -716,10 +665,6 @@ local function build_reverse_group(main_projection, xlit_projection, db_table, t
     return group_main, group_xlit
 end
 
--- 4. 匹配判定引擎 (精准 / 模糊递归)
--- 将“拼音 + 辅码”的底层词典扫描结果缓存起来。
--- check_char_fuma_match 与 collect_best_single_char_match 共用同一份结果，
--- 避免任意并键展开后的多个 probe 在同一按键过程中被重复扫描。
 local function get_single_char_probe_data(env, pinyin, fuma)
     local cache_key = pinyin .. "\31" .. fuma
     local cache = env._single_probe_cache
@@ -774,6 +719,7 @@ local function get_single_char_probe_data(env, pinyin, fuma)
 
     local data = {
         valid_chars = valid_chars,
+        candidate_weights = candidate_weights,
         ranked = ranked,
     }
 
@@ -795,31 +741,30 @@ local function check_char_fuma_match(env, pinyin, fuma, target_char)
     return data.valid_chars[target_char] == true
 end
 
--- 收集一个拼音位置在当前辅码下最优的单字。
--- 18键模式会把并键辅码展开后合并结果，原字只要命中任一展开分支就优先保留。
 local function collect_best_single_char_match(env, pinyin, fuma, orig_char)
     local data = get_single_char_probe_data(env, pinyin, fuma)
     local orig_valid = data.valid_chars[orig_char] == true
+    local orig_weight = (data.candidate_weights and data.candidate_weights[orig_char]) or -math.huge
     local first_char = nil
     local second_char = nil
+    local first_weight = -math.huge
+    local second_weight = -math.huge
 
-    -- 原实现会在原字有效时把原字排除在替换候选之外；这里保持完全相同的行为。
     for _, item in ipairs(data.ranked) do
         if item.char ~= orig_char then
             if not first_char then
                 first_char = item.char
+                first_weight = item.weight or -math.huge
             elseif not second_char then
                 second_char = item.char
+                second_weight = item.weight or -math.huge
                 break
             end
         end
     end
 
-    if orig_valid then
-        return true, nil, first_char
-    end
-
-    return false, first_char, second_char
+    return orig_valid, first_char, second_char,
+        first_weight, second_weight, orig_weight
 end
 
 local function group_match(group, fuma)
@@ -915,7 +860,6 @@ local function match_fuzzy_recursive(codes_sequence, idx, input_str, input_idx, 
     return result
 end
 
--- 5. 候选项数据构建核心
 local function ensure_db_cache_entry(env, char_str, need_xlit)
     local db_cache = env._db_cache
     local entry = db_cache[char_str]
@@ -1003,7 +947,6 @@ local function build_candidate_raw_data(cand, cand_len, env)
     return raw_data
 end
 
--- 6. 引导模式核心逻辑 (声调翻译 / 词组及单字纠错回溯)
 local function get_syl_offset(cand, ctx)
     local syl_offset = 0
     local spans = ctx.composition:spans()
@@ -1064,15 +1007,85 @@ local function attempt_pure_tone_translation(cand, env, syllables, tone_filter_s
     return nil
 end
 
--- [词组纠错] 1. 尝试长词组整体匹配
--- 从左向右扫描窗口，使较早输入的辅码优先修改句子左侧位置。
-local function try_match_long_phrase(current_text, cand_len, env, syllables, fuma_chunks, syl_offset)
+local function find_leftmost_direct_match_pos(
+    current_text,
+    cand_len,
+    env,
+    syllables,
+    fuma_chunk,
+    syl_offset,
+    search_start_idx,
+    max_pos
+)
+    local chars = text_to_chars(current_text)
+    local first_pos = math.max(search_start_idx or 1, 1)
+    local last_pos = math.min(max_pos or cand_len, cand_len)
+
+    for i = first_pos, last_pos do
+        local orig_char = chars[i]
+        local pinyin_code = syllables[i + syl_offset]
+
+        if pinyin_code and orig_char then
+            if #pinyin_code > 2 then
+                pinyin_code = string.sub(pinyin_code, 1, 2)
+            end
+
+            local is_orig_valid, best_char =
+                collect_best_single_char_match(env, pinyin_code, fuma_chunk, orig_char)
+
+            if is_orig_valid or best_char then
+                return i
+            end
+        end
+    end
+
+    return nil
+end
+
+local function is_active_chunk_spec(active_spec, chunk_idx)
+    if type(active_spec) == "table" then
+        return active_spec[chunk_idx] == true
+    end
+    return active_spec and active_spec > 0 and chunk_idx == active_spec
+end
+
+local function try_match_long_phrase(
+    current_text,
+    cand_len,
+    env,
+    syllables,
+    fuma_chunks,
+    syl_offset,
+    active_chunk_index,
+    search_start_idx
+)
     local fuma_len = #fuma_chunks
     if fuma_len <= 1 or fuma_len > cand_len or not env.main_translator then
         return nil
     end
 
-    for w_start = 1, cand_len - fuma_len + 1 do
+    local max_start = cand_len - fuma_len + 1
+    local first_start = math.max(search_start_idx or 1, 1)
+    if first_start > max_start then
+        return nil
+    end
+
+    local anchor_start = find_leftmost_direct_match_pos(
+        current_text,
+        cand_len,
+        env,
+        syllables,
+        fuma_chunks[1],
+        syl_offset,
+        first_start,
+        max_start
+    )
+
+    if not anchor_start then
+        return nil
+    end
+
+    for w_start = anchor_start, anchor_start do
         local w_end = w_start + fuma_len - 1
         local pure_pinyin_parts = {}
         local valid_window = true
@@ -1108,10 +1121,33 @@ local function try_match_long_phrase(current_text, cand_len, env, syllables, fum
 
                         for _, code_pt in utf8.codes(phrase_text) do
                             local char = utf8.char(code_pt)
-                            if not check_char_fuma_match(env, pure_pinyin_parts[char_idx], fuma_chunks[char_idx], char) then
+                            local orig_char = get_utf8_char_at(orig_phrase_text, char_idx)
+                            local char_matches = check_char_fuma_match(
+                                env,
+                                pure_pinyin_parts[char_idx],
+                                fuma_chunks[char_idx],
+                                char
+                            )
+
+                            if not char_matches then
                                 match_all = false
                                 break
                             end
+
+                            local is_active_chunk = is_active_chunk_spec(active_chunk_index, char_idx)
+                            if not is_active_chunk and orig_char and orig_char ~= "" then
+                                local orig_matches = check_char_fuma_match(
+                                    env,
+                                    pure_pinyin_parts[char_idx],
+                                    fuma_chunks[char_idx],
+                                    orig_char
+                                )
+                                if orig_matches and char ~= orig_char then
+                                    match_all = false
+                                    break
+                                end
+                            end
+
                             char_idx = char_idx + 1
                         end
 
@@ -1127,7 +1163,11 @@ local function try_match_long_phrase(current_text, cand_len, env, syllables, fum
             end
 
             if #matched_texts > 0 then
-                return matched_texts[1], fuma_len, w_end + 1, matched_texts[2]
+                local positions = {}
+                for pos = w_start, w_end do
+                    positions[#positions + 1] = pos
+                end
+                return matched_texts[1], fuma_len, w_end + 1, matched_texts[2], positions
             end
         end
     end
@@ -1135,14 +1175,40 @@ local function try_match_long_phrase(current_text, cand_len, env, syllables, fum
     return nil
 end
 
--- [词组纠错] 2. 尝试2字词双向辅助匹配
--- 从 search_start_idx 开始向右寻找第一个可修改的二字窗口。
 local function try_match_two_char_phrase(current_text, search_start_idx, cand_len, env, syllables, fuma_chunk, syl_offset)
-    if search_start_idx > cand_len - 1 or not env.main_translator then
+    if search_start_idx > cand_len or not env.main_translator then
         return nil
     end
 
-    for w_start = search_start_idx, cand_len - 1 do
+    local anchor_pos = find_leftmost_direct_match_pos(
+        current_text,
+        cand_len,
+        env,
+        syllables,
+        fuma_chunk,
+        syl_offset,
+        search_start_idx,
+        cand_len
+    )
+
+    if not anchor_pos then
+        return nil
+    end
+
+    local window_starts = {}
+    local seen_starts = {}
+
+    local function add_window_start(pos)
+        if pos >= search_start_idx and pos >= 1 and pos <= cand_len - 1 and not seen_starts[pos] then
+            seen_starts[pos] = true
+            window_starts[#window_starts + 1] = pos
+        end
+    end
+
+    add_window_start(anchor_pos - 1)
+    add_window_start(anchor_pos)
+
+    for _, w_start in ipairs(window_starts) do
         local w_end = w_start + 1
         local pure_pinyin_parts = {}
         local valid_window = true
@@ -1180,12 +1246,17 @@ local function try_match_two_char_phrase(current_text, search_start_idx, cand_le
                         local orig_char1 = get_utf8_char_at(orig_phrase_text, 1)
                         local orig_char2 = get_utf8_char_at(orig_phrase_text, 2)
 
-                        local case_a = char2 == orig_char2
-                            and check_char_fuma_match(env, pure_pinyin_parts[1], fuma_chunk, char1)
-                        local case_b = char1 == orig_char1
-                            and check_char_fuma_match(env, pure_pinyin_parts[2], fuma_chunk, char2)
+                        local changes_anchor = false
 
-                        if case_a or case_b then
+                        if anchor_pos == w_start then
+                            changes_anchor = char2 == orig_char2
+                                and check_char_fuma_match(env, pure_pinyin_parts[1], fuma_chunk, char1)
+                        elseif anchor_pos == w_end then
+                            changes_anchor = char1 == orig_char1
+                                and check_char_fuma_match(env, pure_pinyin_parts[2], fuma_chunk, char2)
+                        end
+
+                        if changes_anchor then
                             seen[c.text] = true
                             matched_texts[#matched_texts + 1] = replace_text_range(current_text, w_start, w_end, c.text)
                             if #matched_texts >= 2 then
@@ -1196,7 +1267,7 @@ local function try_match_two_char_phrase(current_text, search_start_idx, cand_le
                 end
 
                 if #matched_texts > 0 then
-                    return matched_texts[1], 1, w_end + 1, matched_texts[2]
+                    return matched_texts[1], 1, anchor_pos + 1, matched_texts[2], { anchor_pos }
                 end
             end
         end
@@ -1205,14 +1276,12 @@ local function try_match_two_char_phrase(current_text, search_start_idx, cand_le
     return nil
 end
 
--- 局部词组保护参数。
--- 默认仍然选择最靠左的匹配；只有左侧替换明显破坏已有词组时，
--- 才允许上下文更合理的后方位置覆盖它。
 local LOCAL_CONTEXT_WEIGHTS = {
     [2] = 4,
     [3] = 7,
 }
 local LOCAL_CONTEXT_STRONG_MARGIN = 7
+local LOCAL_CONTEXT_MIN_OVERRIDE_DISTANCE = 2
 local LOCAL_CONTEXT_QUERY_LIMIT = 200
 
 local function build_local_pinyin_query(syllables, start_idx, end_idx, syl_offset)
@@ -1246,9 +1315,6 @@ local function build_local_phrase_text(chars, start_idx, end_idx, replace_pos, r
     return table.concat(parts)
 end
 
--- 对同一个拼音窗口，主翻译器只查询一次，并缓存前 LOCAL_CONTEXT_QUERY_LIMIT 个词条。
--- 原逻辑对每个“原词/替换词”分别 query；现在改成一次 query 后做集合成员判断，
--- 但查询上限、候选顺序和存在性判定均保持不变。
 local function get_local_query_text_set(env, query_str)
     local cache = env._local_query_cache
     if cache and cache[query_str] then
@@ -1289,8 +1355,6 @@ local function get_local_query_text_set(env, query_str)
     return text_set
 end
 
--- 查询某个二字或三字片段是否是主翻译器能够直接给出的词条。
--- cache 只保存“查询串 + 具体词条”的布尔结果；真正的翻译器结果按查询串复用。
 local function local_phrase_exists(
     env,
     phrase_text,
@@ -1321,8 +1385,6 @@ local function local_phrase_exists(
     return found
 end
 
--- 计算替换某个字前后，周围二字词、三字词的词库支持变化。
--- 正数：替换后局部词组更完整；负数：替换破坏了已有词组。
 local function get_local_context_delta(
     chars,
     pos,
@@ -1376,23 +1438,464 @@ local function get_local_context_delta(
         end
     end
 
-    return replacement_support - original_support
+    return replacement_support - original_support, original_support, replacement_support
 end
 
--- 保持“从左到右”为默认规则，只做保守的上下文覆盖：
--- 1. 左侧候选会破坏词组，而后方候选不破坏词组；或
--- 2. 后方候选的局部词组得分至少高一个三字词权重。
-local function should_override_leftmost_match(left_score, later_score)
+local function allow_adjacent_context_override(left_match, later_match, allow_weight_rescue)
+    if not allow_weight_rescue or not left_match or not later_match then
+        return false
+    end
+
+    if (later_match.pos or 0) - (left_match.pos or 0) ~= 1 then
+        return false
+    end
+
+    if not left_match.is_change or not later_match.is_change then
+        return false
+    end
+
+    local left_original = left_match.original_support or 0
+    local left_replacement = left_match.replacement_support or 0
+    local later_replacement = later_match.replacement_support or 0
+    local left_score = left_match.context_score or 0
+    local later_score = later_match.context_score or 0
+
+    return left_original > left_replacement
+        and later_replacement > left_replacement
+        and later_replacement > 0
+        and later_score >= left_score
+end
+
+local function override_distance_allowed(left_match, later_match, allow_weight_rescue)
+    if not left_match or not later_match then
+        return false
+    end
+
+    local distance = (later_match.pos or 0) - (left_match.pos or 0)
+    if distance >= LOCAL_CONTEXT_MIN_OVERRIDE_DISTANCE then
+        return true
+    end
+
+    return allow_adjacent_context_override(left_match, later_match, allow_weight_rescue)
+end
+
+local function should_override_leftmost_match(
+    left_match,
+    later_match,
+    allow_weight_rescue
+)
+    if not override_distance_allowed(left_match, later_match, allow_weight_rescue) then
+        return false
+    end
+
+    local left_score = left_match.context_score or 0
+    local later_score = later_match.context_score or 0
+    local left_weight = left_match.weight or -math.huge
+    local later_weight = later_match.weight or -math.huge
+
+    if (later_match.pos or 0) - (left_match.pos or 0) == 1 then
+        return true
+    end
+
     if left_score < 0 and later_score >= 0 then
         return true
     end
 
-    return later_score - left_score >= LOCAL_CONTEXT_STRONG_MARGIN
+    if later_score - left_score >= LOCAL_CONTEXT_STRONG_MARGIN then
+        return true
+    end
+
+    if allow_weight_rescue
+        and later_match.is_change
+        and later_score >= left_score
+        and later_weight > left_weight
+    then
+        return true
+    end
+
+    return false
 end
 
--- [词组纠错] 3. 尝试单字逐个向右替换
--- 按输入顺序处理辅码；每个辅码选择当前范围内最靠左的可匹配位置。
--- 词频只用于决定同一位置采用哪个候选字，避免后面的高频字抢走辅码。
+local function can_match_remaining_chunks(
+    chars,
+    start_pos,
+    fuma_chunks,
+    next_chunk_idx,
+    env,
+    syllables,
+    syl_offset
+)
+    if next_chunk_idx > #fuma_chunks then
+        return true
+    end
+
+    local current_pos = math.max(start_pos or 1, 1)
+
+    for c_idx = next_chunk_idx, #fuma_chunks do
+        local remaining_after = #fuma_chunks - c_idx
+        local max_pos = #chars - remaining_after
+        local found_pos = nil
+
+        for i = current_pos, max_pos do
+            local orig_char = chars[i]
+            local pinyin_code = syllables[i + syl_offset]
+
+            if pinyin_code and orig_char then
+                if #pinyin_code > 2 then
+                    pinyin_code = string.sub(pinyin_code, 1, 2)
+                end
+
+                local is_orig_valid, best_char = collect_best_single_char_match(
+                    env,
+                    pinyin_code,
+                    fuma_chunks[c_idx],
+                    orig_char
+                )
+
+                if is_orig_valid or best_char then
+                    found_pos = i
+                    break
+                end
+            end
+        end
+
+        if not found_pos then
+            return false
+        end
+
+        current_pos = found_pos + 1
+    end
+
+    return true
+end
+
+local POSITION_RESCUE_CANDIDATE_LIMIT = 6
+
+local function is_better_position_rescue(candidate, current_best)
+    if not candidate then
+        return false
+    end
+    if not current_best then
+        return true
+    end
+
+    local candidate_support = candidate.replacement_support or 0
+    local best_support = current_best.replacement_support or 0
+    if candidate_support ~= best_support then
+        return candidate_support > best_support
+    end
+
+    local candidate_weight = candidate.weight or -math.huge
+    local best_weight = current_best.weight or -math.huge
+    if candidate_weight ~= best_weight then
+        return candidate_weight > best_weight
+    end
+
+    local candidate_delta = candidate.context_score or 0
+    local best_delta = current_best.context_score or 0
+    if candidate_delta ~= best_delta then
+        return candidate_delta > best_delta
+    end
+
+    return (candidate.pos or math.huge) < (current_best.pos or math.huge)
+end
+
+local function is_better_same_position_match(candidate, current_best, prefer_change)
+    if not candidate then
+        return false
+    end
+    if not current_best then
+        return true
+    end
+
+    local candidate_support = candidate.replacement_support or 0
+    local best_support = current_best.replacement_support or 0
+    if candidate_support ~= best_support then
+        return candidate_support > best_support
+    end
+
+    local candidate_delta = candidate.context_score or 0
+    local best_delta = current_best.context_score or 0
+    if candidate_delta ~= best_delta then
+        return candidate_delta > best_delta
+    end
+
+    if candidate.is_change ~= current_best.is_change then
+        if prefer_change then
+            return candidate.is_change
+        end
+        return not candidate.is_change
+    end
+
+    local candidate_weight = candidate.weight or -math.huge
+    local best_weight = current_best.weight or -math.huge
+    if candidate_weight ~= best_weight then
+        return candidate_weight > best_weight
+    end
+
+    return tostring(candidate.char or "") < tostring(current_best.char or "")
+end
+
+
+local RELEASE_BACKTRACK_MAX_STATES = 768
+local RELEASE_BACKTRACK_MAX_RESULTS = 2
+local RELEASE_BACKTRACK_CANDIDATES_PER_POSITION = 6
+
+local function copy_char_list(chars)
+    local out = {}
+    for i = 1, #chars do
+        out[i] = chars[i]
+    end
+    return out
+end
+
+local function copy_number_list(values)
+    local out = {}
+    for i = 1, #(values or {}) do
+        out[i] = values[i]
+    end
+    return out
+end
+
+local function collect_release_position_matches(
+    chars,
+    pos,
+    chunk_fuma,
+    env,
+    syllables,
+    syl_offset,
+    context_cache,
+    prefer_change
+)
+    local orig_char = chars[pos]
+    local pinyin_code = syllables[pos + syl_offset]
+    if not orig_char or not pinyin_code then
+        return {}
+    end
+
+    if #pinyin_code > 2 then
+        pinyin_code = string.sub(pinyin_code, 1, 2)
+    end
+
+    local probe_data = get_single_char_probe_data(env, pinyin_code, chunk_fuma)
+    local matches = {}
+    local seen = {}
+
+    local function add_match(char, weight)
+        if not char or seen[char] then
+            return
+        end
+        seen[char] = true
+
+        local context_score, original_support, replacement_support =
+            get_local_context_delta(
+                chars,
+                pos,
+                char,
+                env,
+                syllables,
+                syl_offset,
+                context_cache
+            )
+
+        matches[#matches + 1] = {
+            pos = pos,
+            char = char,
+            weight = weight or -math.huge,
+            context_score = context_score or 0,
+            original_support = original_support or 0,
+            replacement_support = replacement_support or 0,
+            is_change = char ~= orig_char,
+        }
+    end
+
+    if probe_data.valid_chars[orig_char] then
+        add_match(
+            orig_char,
+            (probe_data.candidate_weights and probe_data.candidate_weights[orig_char])
+                or -math.huge
+        )
+    end
+
+    for _, item in ipairs(probe_data.ranked or {}) do
+        if item.char ~= orig_char then
+            add_match(item.char, item.weight)
+            if #matches >= RELEASE_BACKTRACK_CANDIDATES_PER_POSITION then
+                break
+            end
+        end
+    end
+
+    table.sort(matches, function(a, b)
+        return is_better_same_position_match(a, b, prefer_change)
+    end)
+
+    while #matches > RELEASE_BACKTRACK_CANDIDATES_PER_POSITION do
+        table.remove(matches)
+    end
+
+    return matches
+end
+
+local function has_preview_match_from(
+    chars,
+    search_start_idx,
+    preview_chunk,
+    env,
+    syllables,
+    syl_offset
+)
+    if not preview_chunk or preview_chunk == "" then
+        return true
+    end
+
+    local first_pos = math.max(search_start_idx or 1, 1)
+    for pos = first_pos, #chars do
+        local orig_char = chars[pos]
+        local pinyin_code = syllables[pos + syl_offset]
+        if orig_char and pinyin_code then
+            if #pinyin_code > 2 then
+                pinyin_code = string.sub(pinyin_code, 1, 2)
+            end
+
+            local probe_data = get_single_char_probe_data(
+                env,
+                pinyin_code,
+                preview_chunk
+            )
+            if probe_data.valid_chars[orig_char]
+                or (probe_data.ranked and #probe_data.ranked > 0)
+            then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function try_match_single_chars_with_release(
+    current_text,
+    search_start_idx,
+    env,
+    syllables,
+    fuma_chunks,
+    syl_offset,
+    match_count,
+    active_chunk_index,
+    required_preview_chunk
+)
+    local base_chars = text_to_chars(current_text)
+    local first_pos = math.max(search_start_idx or 1, 1)
+    local results = {}
+    local seen_texts = {}
+    local explored_states = 0
+    local context_cache = {}
+
+    local function add_result(chars, next_start, positions)
+        local text_value = chars_to_text(chars)
+        local pos_key = table.concat(positions or {}, ",")
+        local result_key = text_value .. "\31" .. pos_key
+        if seen_texts[result_key] then
+            return
+        end
+        seen_texts[result_key] = true
+        results[#results + 1] = {
+            text = text_value,
+            next_start = next_start,
+            positions = copy_number_list(positions),
+        }
+    end
+
+    local function dfs(chars, chunk_idx, current_start, positions)
+        if #results >= RELEASE_BACKTRACK_MAX_RESULTS
+            or explored_states >= RELEASE_BACKTRACK_MAX_STATES
+        then
+            return
+        end
+
+        explored_states = explored_states + 1
+
+        if chunk_idx > #fuma_chunks then
+            if has_preview_match_from(
+                chars,
+                current_start,
+                required_preview_chunk,
+                env,
+                syllables,
+                syl_offset
+            ) then
+                add_result(chars, current_start, positions)
+            end
+            return
+        end
+
+        local remaining_after = #fuma_chunks - chunk_idx
+        local preview_reserve = required_preview_chunk and 1 or 0
+        local max_pos = #chars - remaining_after - preview_reserve
+        if current_start > max_pos then
+            return
+        end
+
+        local is_active_chunk = is_active_chunk_spec(active_chunk_index, chunk_idx)
+        local prefer_change = is_active_chunk and current_start > 1
+
+        for pos = current_start, max_pos do
+            local position_matches = collect_release_position_matches(
+                chars,
+                pos,
+                fuma_chunks[chunk_idx],
+                env,
+                syllables,
+                syl_offset,
+                context_cache,
+                prefer_change
+            )
+
+            for _, match in ipairs(position_matches) do
+                local next_chars = copy_char_list(chars)
+                next_chars[pos] = match.char
+
+                if chunk_idx == #fuma_chunks
+                    or can_match_remaining_chunks(
+                        next_chars,
+                        pos + 1,
+                        fuma_chunks,
+                        chunk_idx + 1,
+                        env,
+                        syllables,
+                        syl_offset
+                    )
+                then
+                    local next_positions = copy_number_list(positions)
+                    next_positions[#next_positions + 1] = pos
+                    dfs(next_chars, chunk_idx + 1, pos + 1, next_positions)
+                end
+
+                if #results >= RELEASE_BACKTRACK_MAX_RESULTS
+                    or explored_states >= RELEASE_BACKTRACK_MAX_STATES
+                then
+                    return
+                end
+            end
+        end
+    end
+
+    dfs(base_chars, 1, first_pos, {})
+
+    if #results == 0 then
+        return nil
+    end
+
+    local primary = results[1]
+    local secondary = results[2]
+    return primary.text,
+        match_count + #fuma_chunks,
+        primary.next_start,
+        secondary and secondary.text or nil,
+        primary.positions
+end
+
 local function try_match_single_chars(
     current_text,
     search_start_idx,
@@ -1400,29 +1903,30 @@ local function try_match_single_chars(
     syllables,
     fuma_chunks,
     syl_offset,
-    match_count
+    match_count,
+    active_chunk_index
 )
+    local original_text = current_text
+    local original_start = math.max(search_start_idx or 1, 1)
+    local initial_match_count = match_count
     local chars = text_to_chars(current_text)
-    local current_start = math.max(search_start_idx or 1, 1)
+    local current_start = original_start
     local m_count = match_count
     local changed = false
     local alternate_chars = nil
+    local matched_positions = {}
     local context_cache = {}
 
-    -- 辅码按输入顺序从左向右处理。
     for c_idx = 1, #fuma_chunks do
         local chunk_fuma = fuma_chunks[c_idx]
+        local is_active_chunk = is_active_chunk_spec(active_chunk_index, c_idx)
         local leftmost_match = nil
         local best_context_match = nil
+        local best_position_rescue = nil
 
-        -- 为尚未处理的辅码预留足够字符。
-        -- 例如四字句输入四块辅码时，第 1 块只能落在第 1 个字，
-        -- 防止局部词组评分把它跳到后面，导致最后一块无处匹配。
         local remaining_chunks = #fuma_chunks - c_idx
         local max_match_pos = #chars - remaining_chunks
 
-        -- 仍然从左向右扫描，但不再遇到第一个候选就立刻结束。
-        -- 先记录最靠左候选，再检查有效范围内是否存在明显更合理的词组位置。
         for i = current_start, max_match_pos do
             local orig_char = chars[i]
             local pinyin_code = syllables[i + syl_offset]
@@ -1432,61 +1936,260 @@ local function try_match_single_chars(
                     pinyin_code = string.sub(pinyin_code, 1, 2)
                 end
 
-                local is_orig_valid, local_best_cand, local_second_cand =
-                    collect_best_single_char_match(env, pinyin_code, chunk_fuma, orig_char)
+                local probe_data = get_single_char_probe_data(env, pinyin_code, chunk_fuma)
+                local is_orig_valid = probe_data.valid_chars[orig_char] == true
+                local orig_weight = (probe_data.candidate_weights and probe_data.candidate_weights[orig_char])
+                    or -math.huge
 
-                local matched_char = nil
-                if is_orig_valid then
-                    matched_char = orig_char
-                elseif local_best_cand then
-                    matched_char = local_best_cand
+                local replacement_items = {}
+                for _, item in ipairs(probe_data.ranked or {}) do
+                    if item.char ~= orig_char then
+                        replacement_items[#replacement_items + 1] = item
+                        if #replacement_items >= POSITION_RESCUE_CANDIDATE_LIMIT then
+                            break
+                        end
+                    end
                 end
 
-                if matched_char then
-                    local context_score = get_local_context_delta(
+                local best_item = replacement_items[1]
+                local second_item = replacement_items[2]
+
+                local matched_char = nil
+                local matched_weight = -math.huge
+                local alternate_char = nil
+                local alternate_weight = -math.huge
+
+                if not is_active_chunk then
+                    if is_orig_valid then
+                        matched_char = orig_char
+                        matched_weight = orig_weight
+                    elseif best_item then
+                        matched_char = best_item.char
+                        matched_weight = best_item.weight or -math.huge
+                        if second_item then
+                            alternate_char = second_item.char
+                            alternate_weight = second_item.weight or -math.huge
+                        end
+                    end
+                else
+                    local prefer_replacement = current_start > 1
+                    if best_item and (not is_orig_valid or prefer_replacement) then
+                        matched_char = best_item.char
+                        matched_weight = best_item.weight or -math.huge
+                        if is_orig_valid then
+                            alternate_char = orig_char
+                            alternate_weight = orig_weight
+                        elseif second_item then
+                            alternate_char = second_item.char
+                            alternate_weight = second_item.weight or -math.huge
+                        end
+                    elseif is_orig_valid then
+                        matched_char = orig_char
+                        matched_weight = orig_weight
+                        if best_item then
+                            alternate_char = best_item.char
+                            alternate_weight = best_item.weight or -math.huge
+                        end
+                    end
+                end
+
+                local function make_match(char, weight, alt_char, alt_weight)
+                    if not char then
+                        return nil
+                    end
+
+                    local context_score, original_support, replacement_support =
+                        get_local_context_delta(
+                            chars,
+                            i,
+                            char,
+                            env,
+                            syllables,
+                            syl_offset,
+                            context_cache
+                        )
+
+                    return {
+                        pos = i,
+                        char = char,
+                        alt_char = alt_char,
+                        weight = weight or -math.huge,
+                        alt_weight = alt_weight or -math.huge,
+                        context_score = context_score or 0,
+                        original_support = original_support or 0,
+                        replacement_support = replacement_support or 0,
+                        is_change = char ~= orig_char,
+                    }
+                end
+
+                local primary_match = make_match(
+                    matched_char,
+                    matched_weight,
+                    alternate_char,
+                    alternate_weight
+                )
+
+                if is_active_chunk then
+                    local same_position_matches = {}
+                    local original_match = nil
+                    local position_original_support = 0
+
+                    if is_orig_valid then
+                        original_match = make_match(orig_char, orig_weight, nil, -math.huge)
+                    end
+
+                    for _, item in ipairs(replacement_items) do
+                        local item_match = make_match(item.char, item.weight, nil, -math.huge)
+                        if item_match then
+                            same_position_matches[#same_position_matches + 1] = item_match
+                            if (item_match.original_support or 0) > position_original_support then
+                                position_original_support = item_match.original_support or 0
+                            end
+                        end
+                    end
+
+                    if original_match then
+                        original_match.original_support = position_original_support
+                        original_match.replacement_support = position_original_support
+                        original_match.context_score = 0
+                        same_position_matches[#same_position_matches + 1] = original_match
+                    end
+
+                    if #same_position_matches > 0 then
+                        local prefer_change = current_start > 1
+                        table.sort(same_position_matches, function(a, b)
+                            return is_better_same_position_match(a, b, prefer_change)
+                        end)
+
+                        primary_match = same_position_matches[1]
+                        local same_position_second = same_position_matches[2]
+                        if same_position_second
+                            and same_position_second.char ~= primary_match.char
+                        then
+                            primary_match.alt_char = same_position_second.char
+                            primary_match.alt_weight = same_position_second.weight or -math.huge
+                        else
+                            primary_match.alt_char = nil
+                            primary_match.alt_weight = -math.huge
+                        end
+                    end
+                end
+
+                if primary_match then
+                    if not leftmost_match then
+                        leftmost_match = primary_match
+                        best_context_match = primary_match
+                    elseif primary_match.context_score > best_context_match.context_score
+                        or (
+                            primary_match.context_score == best_context_match.context_score
+                            and primary_match.replacement_support > (best_context_match.replacement_support or 0)
+                        )
+                        or (
+                            primary_match.context_score == best_context_match.context_score
+                            and primary_match.replacement_support == (best_context_match.replacement_support or 0)
+                            and primary_match.weight > (best_context_match.weight or -math.huge)
+                        )
+                    then
+                        best_context_match = primary_match
+                    end
+                end
+
+                if is_active_chunk
+                    and leftmost_match
+                    and current_start > 1
+                    and i > leftmost_match.pos
+                then
+                    local remaining_ok = can_match_remaining_chunks(
                         chars,
-                        i,
-                        matched_char,
+                        i + 1,
+                        fuma_chunks,
+                        c_idx + 1,
                         env,
                         syllables,
-                        syl_offset,
-                        context_cache
+                        syl_offset
                     )
 
-                    local current_match = {
-                        pos = i,
-                        char = matched_char,
-                        alt_char = local_second_cand,
-                        context_score = context_score,
-                    }
+                    if remaining_ok then
+                        for item_idx, item in ipairs(replacement_items) do
+                            local rescue_alt = nil
+                            local rescue_alt_weight = -math.huge
 
-                    if not leftmost_match then
-                        leftmost_match = current_match
-                        best_context_match = current_match
-                    elseif context_score > best_context_match.context_score then
-                        best_context_match = current_match
+                            if primary_match and primary_match.char ~= item.char then
+                                rescue_alt = primary_match.char
+                                rescue_alt_weight = primary_match.weight or -math.huge
+                            elseif is_orig_valid then
+                                rescue_alt = orig_char
+                                rescue_alt_weight = orig_weight
+                            elseif replacement_items[item_idx + 1] then
+                                rescue_alt = replacement_items[item_idx + 1].char
+                                rescue_alt_weight = replacement_items[item_idx + 1].weight or -math.huge
+                            end
+
+                            local rescue_match = make_match(
+                                item.char,
+                                item.weight,
+                                rescue_alt,
+                                rescue_alt_weight
+                            )
+
+                            if rescue_match
+                                and rescue_match.is_change
+                                and override_distance_allowed(
+                                    leftmost_match,
+                                    rescue_match,
+                                    current_start > 1
+                                )
+                                and rescue_match.replacement_support >= (leftmost_match.replacement_support or 0)
+                                and (
+                                    (leftmost_match.original_support or 0) > 0
+                                    or rescue_match.replacement_support > (leftmost_match.replacement_support or 0)
+                                )
+                                and (
+                                    rescue_match.replacement_support > (leftmost_match.replacement_support or 0)
+                                    or rescue_match.weight > (leftmost_match.weight or -math.huge)
+                                )
+                                and is_better_position_rescue(rescue_match, best_position_rescue)
+                            then
+                                best_position_rescue = rescue_match
+                            end
+                        end
                     end
                 end
             end
         end
 
         local selected_match = leftmost_match
-        if
-            leftmost_match
-            and best_context_match
-            and best_context_match.pos ~= leftmost_match.pos
+
+        if is_active_chunk
+            and leftmost_match and best_context_match and best_context_match.pos ~= leftmost_match.pos
             and should_override_leftmost_match(
-                leftmost_match.context_score,
-                best_context_match.context_score
+                leftmost_match,
+                best_context_match,
+                current_start > 1
+            )
+            and can_match_remaining_chunks(
+                chars,
+                best_context_match.pos + 1,
+                fuma_chunks,
+                c_idx + 1,
+                env,
+                syllables,
+                syl_offset
             )
         then
             selected_match = best_context_match
         end
 
+        if is_active_chunk
+            and best_position_rescue
+            and is_better_position_rescue(best_position_rescue, selected_match)
+        then
+            selected_match = best_position_rescue
+        end
+
         if selected_match then
             m_count = m_count + 1
 
-            -- 已经建立次优分支后，后续确定修改同步应用到次优分支。
             if alternate_chars then
                 alternate_chars[selected_match.pos] = selected_match.char
             elseif selected_match.alt_char and selected_match.alt_char ~= selected_match.char then
@@ -1502,24 +2205,39 @@ local function try_match_single_chars(
                 changed = true
             end
 
-            -- 下一块辅码继续在最终选中位置的右侧搜索。
+            matched_positions[#matched_positions + 1] = selected_match.pos
             current_start = selected_match.pos + 1
-            -- 不清空 context_cache：键中已包含拼音串和具体词条，
-            -- 前文变化会自然产生新键，旧结果仍可安全复用。
+        end
+    end
+
+    if m_count < initial_match_count + #fuma_chunks then
+        local released_text, released_count, released_next, released_alternate, released_positions =
+            try_match_single_chars_with_release(
+                original_text,
+                original_start,
+                env,
+                syllables,
+                fuma_chunks,
+                syl_offset,
+                initial_match_count,
+                active_chunk_index,
+                nil
+            )
+
+        if released_text and released_count == initial_match_count + #fuma_chunks then
+            return released_text, released_count, released_next, released_alternate, released_positions
         end
     end
 
     local alternate_text = alternate_chars and chars_to_text(alternate_chars) or nil
 
     if changed then
-        return chars_to_text(chars), m_count, current_start, alternate_text
+        return chars_to_text(chars), m_count, current_start, alternate_text, matched_positions
     end
 
-    return current_text, m_count, current_start, alternate_text
+    return current_text, m_count, current_start, alternate_text, matched_positions
 end
 
--- 将最后一个单字母辅码拆为“半码预览块”。
--- 例如 HH GV LK R -> 完整块 HH/GV/LK，预览块 R。
 local function split_fuma_chunks_for_preview(fuma_chunks)
     local completed_chunks = {}
 
@@ -1534,7 +2252,6 @@ local function split_fuma_chunks_for_preview(fuma_chunks)
         local letters = last_chunk:gsub("%d", "")
         local digits = last_chunk:gsub("%a", "")
 
-        -- 仅把没有声调数字的末尾单字母视为半码。
         if #letters == 1 and digits == "" then
             preview_chunk = last_chunk
             table.remove(completed_chunks)
@@ -1544,8 +2261,6 @@ local function split_fuma_chunks_for_preview(fuma_chunks)
     return completed_chunks, preview_chunk
 end
 
--- 使用末尾半码生成一个临时候选。
--- 从 search_start_idx 向右选择最靠左的匹配位置；如果找不到，不影响完整辅码结果。
 local function try_preview_half_chunk(
     current_text,
     search_start_idx,
@@ -1573,39 +2288,66 @@ local function try_preview_half_chunk(
                 pinyin_code = string.sub(pinyin_code, 1, 2)
             end
 
-            -- 半码仍使用前缀查询；18键模式会展开当前半码的全部26键可能。
-            local is_orig_valid, best_char, second_char =
+            local is_orig_valid, best_char, second_char,
+                best_weight, second_weight, orig_weight =
                 collect_best_single_char_match(env, pinyin_code, preview_chunk, orig_char)
 
             local matched_char = nil
-            if is_orig_valid then
-                matched_char = orig_char
-            elseif best_char then
+            local matched_weight = -math.huge
+            local alternate_char = nil
+            local alternate_weight = -math.huge
+            local prefer_replacement = first_pos > 1
+
+            if best_char and (not is_orig_valid or prefer_replacement) then
                 matched_char = best_char
+                matched_weight = best_weight or -math.huge
+                if is_orig_valid then
+                    alternate_char = orig_char
+                    alternate_weight = orig_weight or -math.huge
+                else
+                    alternate_char = second_char
+                    alternate_weight = second_weight or -math.huge
+                end
+            elseif is_orig_valid then
+                matched_char = orig_char
+                matched_weight = orig_weight or -math.huge
+                alternate_char = best_char
+                alternate_weight = best_weight or -math.huge
             end
 
             if matched_char then
-                local context_score = get_local_context_delta(
-                    chars,
-                    i,
-                    matched_char,
-                    env,
-                    syllables,
-                    syl_offset,
-                    context_cache
-                )
+                local context_score, original_support, replacement_support =
+                    get_local_context_delta(
+                        chars,
+                        i,
+                        matched_char,
+                        env,
+                        syllables,
+                        syl_offset,
+                        context_cache
+                    )
 
                 local current_match = {
                     pos = i,
                     char = matched_char,
-                    alt_char = second_char,
-                    context_score = context_score,
+                    alt_char = alternate_char,
+                    weight = matched_weight,
+                    alt_weight = alternate_weight,
+                    context_score = context_score or 0,
+                    original_support = original_support or 0,
+                    replacement_support = replacement_support or 0,
+                    is_change = matched_char ~= orig_char,
                 }
 
                 if not leftmost_match then
                     leftmost_match = current_match
                     best_context_match = current_match
-                elseif context_score > best_context_match.context_score then
+                elseif context_score > best_context_match.context_score
+                    or (
+                        context_score == best_context_match.context_score
+                        and matched_weight > (best_context_match.weight or -math.huge)
+                    )
+                then
                     best_context_match = current_match
                 end
             end
@@ -1618,8 +2360,9 @@ local function try_preview_half_chunk(
         and best_context_match
         and best_context_match.pos ~= leftmost_match.pos
         and should_override_leftmost_match(
-            leftmost_match.context_score,
-            best_context_match.context_score
+            leftmost_match,
+            best_context_match,
+            first_pos > 1
         )
     then
         selected_match = best_context_match
@@ -1647,128 +2390,459 @@ local function try_preview_half_chunk(
     return current_text, false, search_start_idx, nil
 end
 
--- 组装引导模式的主词组/单字纠错逻辑
-local function attempt_phrase_correction(cand, cand_len, env, syllables, fuma_chunks, syl_offset)
+local function copy_chunk_range(chunks, first_idx, last_idx)
+    local out = {}
+    for i = first_idx, last_idx do
+        out[#out + 1] = chunks[i]
+    end
+    return out
+end
+
+local function match_chunk_group(
+    current_text,
+    search_start_idx,
+    cand_len,
+    env,
+    syllables,
+    chunks,
+    syl_offset,
+    active_chunk_index
+)
+    if #chunks == 0 then
+        return current_text, 0, search_start_idx, nil
+    end
+
+    local new_text, count, next_start, second_text, positions =
+        try_match_long_phrase(
+            current_text,
+            cand_len,
+            env,
+            syllables,
+            chunks,
+            syl_offset,
+            active_chunk_index,
+            search_start_idx
+        )
+
+    if new_text then
+        return new_text, count, next_start, second_text, positions
+    end
+
+    if #chunks == 1 and is_active_chunk_spec(active_chunk_index, 1) then
+        new_text, count, next_start, second_text, positions =
+            try_match_two_char_phrase(
+                current_text,
+                search_start_idx,
+                cand_len,
+                env,
+                syllables,
+                chunks[1],
+                syl_offset
+            )
+
+        if new_text then
+            return new_text, count, next_start, second_text, positions
+        end
+    end
+
+    return try_match_single_chars(
+        current_text,
+        search_start_idx,
+        env,
+        syllables,
+        chunks,
+        syl_offset,
+        0,
+        active_chunk_index
+    )
+end
+
+local function try_match_segmented_chunks(
+    current_text,
+    search_start_idx,
+    cand_len,
+    env,
+    syllables,
+    chunks,
+    syl_offset,
+    preview_chunk
+)
+    local chunk_count = #chunks
+    if chunk_count < 3 then
+        return nil
+    end
+
+    for prefix_len = chunk_count - 1, 2, -1 do
+        local prefix_chunks = copy_chunk_range(chunks, 1, prefix_len)
+        local prefix_text, prefix_count, prefix_next, prefix_second, prefix_positions =
+            try_match_long_phrase(
+                current_text,
+                cand_len,
+                env,
+                syllables,
+                prefix_chunks,
+                syl_offset,
+                prefix_len,
+                search_start_idx
+            )
+
+        if prefix_text and prefix_count == prefix_len then
+            local suffix_chunks = copy_chunk_range(chunks, prefix_len + 1, chunk_count)
+            local suffix_active_index = preview_chunk and 0 or #suffix_chunks
+            local final_text, suffix_count, final_next, suffix_second, suffix_positions =
+                match_chunk_group(
+                    prefix_text,
+                    prefix_next,
+                    cand_len,
+                    env,
+                    syllables,
+                    suffix_chunks,
+                    syl_offset,
+                    suffix_active_index
+                )
+
+            if suffix_count == #suffix_chunks then
+                local alternate_text = suffix_second
+
+                if not alternate_text and prefix_second then
+                    local alt_text, alt_count =
+                        match_chunk_group(
+                            prefix_second,
+                            prefix_next,
+                            cand_len,
+                            env,
+                            syllables,
+                            suffix_chunks,
+                            syl_offset,
+                            suffix_active_index
+                        )
+                    if alt_count == #suffix_chunks then
+                        alternate_text = alt_text
+                    end
+                end
+
+                local positions = {}
+                for _, pos in ipairs(prefix_positions or {}) do
+                    positions[#positions + 1] = pos
+                end
+                for _, pos in ipairs(suffix_positions or {}) do
+                    positions[#positions + 1] = pos
+                end
+                return final_text, prefix_count + suffix_count, final_next, alternate_text, positions
+            end
+        end
+    end
+
+    return nil
+end
+
+local function rebuild_text_from_locked_prefix(base_text, stable_text, last_locked_pos)
+    if not stable_text or stable_text == "" or not last_locked_pos or last_locked_pos <= 0 then
+        return base_text
+    end
+
+    local base_chars = text_to_chars(base_text)
+    local stable_chars = text_to_chars(stable_text)
+    local limit = math.min(last_locked_pos, #base_chars, #stable_chars)
+
+    for i = 1, limit do
+        base_chars[i] = stable_chars[i]
+    end
+
+    return chars_to_text(base_chars)
+end
+
+local function attempt_phrase_correction(cand, cand_len, env, syllables, fuma_chunks, syl_offset, seed_progress)
     if #fuma_chunks == 0 then
         return nil
     end
 
     local completed_chunks, preview_chunk = split_fuma_chunks_for_preview(fuma_chunks)
-    local current_text = cand.text
-    local alternate_text = nil
-    local match_count = 0
-    local search_start_idx = 1
-    local preview_matched = false
+    local saved_positions = {}
+    local saved_count = 0
+    local saved_text = nil
 
-    if #completed_chunks > 0 then
-        local new_text, count, next_start, second_text =
-            try_match_long_phrase(current_text, cand_len, env, syllables, completed_chunks, syl_offset)
+    if seed_progress
+        and seed_progress.stable_text
+        and seed_progress.stable_text ~= ""
+        and get_utf8_len(seed_progress.stable_text) == cand_len
+    then
+        saved_text = seed_progress.stable_text
+        for _, pos in ipairs(seed_progress.bound_positions or {}) do
+            local n = tonumber(pos)
+            if n and n >= 1 and n <= cand_len then
+                saved_positions[#saved_positions + 1] = n
+            end
+        end
+        saved_count = math.min(
+            tonumber(seed_progress.completed_count) or #saved_positions,
+            #saved_positions,
+            #completed_chunks
+        )
+    end
 
-        if new_text then
-            current_text = new_text
-            alternate_text = second_text
-            match_count = count
-            search_start_idx = next_start
-        elseif #completed_chunks == 1 then
-            new_text, count, next_start, second_text =
-                try_match_two_char_phrase(
+    local function run_with_locked_count(locked_count)
+        local bound_positions = {}
+        for i = 1, locked_count do
+            bound_positions[i] = saved_positions[i]
+        end
+
+        local last_locked_pos = locked_count > 0 and bound_positions[locked_count] or 0
+        local current_text = rebuild_text_from_locked_prefix(
+            cand.text,
+            saved_text,
+            last_locked_pos
+        )
+        local remaining_chunks = {}
+        for i = locked_count + 1, #completed_chunks do
+            remaining_chunks[#remaining_chunks + 1] = completed_chunks[i]
+        end
+
+        local released_history = locked_count < saved_count
+        local active_remaining_chunk_index
+
+        if released_history then
+            active_remaining_chunk_index = {}
+            for i = 1, #remaining_chunks do
+                active_remaining_chunk_index[i] = true
+            end
+        else
+            active_remaining_chunk_index = preview_chunk and 0 or #remaining_chunks
+        end
+
+        local alternate_text = nil
+        local match_count = locked_count
+        local search_start_idx = last_locked_pos > 0 and last_locked_pos + 1 or 1
+        local rematch_base_text = current_text
+        local rematch_start_idx = search_start_idx
+        local new_positions = {}
+
+        if #remaining_chunks > 0 then
+            local new_match_count = 0
+
+            if released_history then
+                current_text, new_match_count, search_start_idx, alternate_text, new_positions =
+                    match_chunk_group(
+                        current_text,
+                        search_start_idx,
+                        cand_len,
+                        env,
+                        syllables,
+                        remaining_chunks,
+                        syl_offset,
+                        active_remaining_chunk_index
+                    )
+            else
+                local new_text, count, next_start, second_text, positions =
+                    try_match_long_phrase(
+                        current_text,
+                        cand_len,
+                        env,
+                        syllables,
+                        remaining_chunks,
+                        syl_offset,
+                        active_remaining_chunk_index,
+                        search_start_idx
+                    )
+
+                if new_text then
+                    current_text = new_text
+                    alternate_text = second_text
+                    new_match_count = count
+                    search_start_idx = next_start
+                    new_positions = positions or {}
+                else
+                    new_text, count, next_start, second_text, positions =
+                        try_match_segmented_chunks(
+                            current_text,
+                            search_start_idx,
+                            cand_len,
+                            env,
+                            syllables,
+                            remaining_chunks,
+                            syl_offset,
+                            preview_chunk
+                        )
+
+                    if new_text then
+                        current_text = new_text
+                        alternate_text = second_text
+                        new_match_count = count
+                        search_start_idx = next_start
+                        new_positions = positions or {}
+                    end
+                end
+
+                if new_match_count == 0 then
+                    current_text, new_match_count, search_start_idx, alternate_text, new_positions =
+                        match_chunk_group(
+                            current_text,
+                            search_start_idx,
+                            cand_len,
+                            env,
+                            syllables,
+                            remaining_chunks,
+                            syl_offset,
+                            active_remaining_chunk_index
+                        )
+                end
+            end
+
+            match_count = locked_count + new_match_count
+        end
+
+        if match_count ~= #completed_chunks then
+            return nil
+        end
+
+        for _, pos in ipairs(new_positions or {}) do
+            bound_positions[#bound_positions + 1] = pos
+        end
+
+        if #bound_positions ~= #completed_chunks then
+            return nil
+        end
+
+        local stable_text = current_text
+        local preview_matched = false
+
+        if preview_chunk then
+            local preview_start = search_start_idx
+            local preview_alt = nil
+            current_text, preview_matched, search_start_idx, preview_alt =
+                try_preview_half_chunk(
                     current_text,
-                    search_start_idx,
-                    cand_len,
+                    preview_start,
                     env,
                     syllables,
-                    completed_chunks[1],
+                    preview_chunk,
                     syl_offset
                 )
 
-            if new_text then
-                current_text = new_text
-                alternate_text = second_text
-                match_count = count
-                search_start_idx = next_start
-            end
-        end
+            if not preview_matched and #remaining_chunks > 0 then
+                local all_active = {}
+                for i = 1, #remaining_chunks do
+                    all_active[i] = true
+                end
 
-        if match_count == 0 then
-            current_text, match_count, search_start_idx, alternate_text =
-                try_match_single_chars(
-                    current_text,
-                    search_start_idx,
+                local constrained_text,
+                    constrained_count,
+                    constrained_next,
+                    constrained_alternate,
+                    constrained_positions =
+                    try_match_single_chars_with_release(
+                        rematch_base_text,
+                        rematch_start_idx,
+                        env,
+                        syllables,
+                        remaining_chunks,
+                        syl_offset,
+                        0,
+                        all_active,
+                        preview_chunk
+                    )
+
+                if constrained_text
+                    and constrained_count == #remaining_chunks
+                then
+                    current_text = constrained_text
+                    alternate_text = constrained_alternate
+                    search_start_idx = constrained_next
+                    new_positions = constrained_positions or {}
+                    bound_positions = {}
+                    for i = 1, locked_count do
+                        bound_positions[i] = saved_positions[i]
+                    end
+                    for _, pos in ipairs(new_positions) do
+                        bound_positions[#bound_positions + 1] = pos
+                    end
+                    stable_text = current_text
+                    preview_start = search_start_idx
+                    current_text, preview_matched, search_start_idx, preview_alt =
+                        try_preview_half_chunk(
+                            current_text,
+                            preview_start,
+                            env,
+                            syllables,
+                            preview_chunk,
+                            syl_offset
+                        )
+                end
+            end
+
+            if not preview_matched and locked_count > 0 then
+                return nil
+            end
+
+            if alternate_text then
+                local alt_preview_text = select(1, try_preview_half_chunk(
+                    alternate_text,
+                    preview_start,
                     env,
                     syllables,
-                    completed_chunks,
-                    syl_offset,
-                    match_count
-                )
-        end
-    end
-
-    if preview_chunk then
-        local preview_start = search_start_idx
-        local preview_alt = nil
-        current_text, preview_matched, search_start_idx, preview_alt =
-            try_preview_half_chunk(
-                current_text,
-                preview_start,
-                env,
-                syllables,
-                preview_chunk,
-                syl_offset
-            )
-
-        if alternate_text then
-            local alt_preview_text = nil
-            alt_preview_text = select(1, try_preview_half_chunk(
-                alternate_text,
-                preview_start,
-                env,
-                syllables,
-                preview_chunk,
-                syl_offset
-            ))
-            if alt_preview_text then
-                alternate_text = alt_preview_text
+                    preview_chunk,
+                    syl_offset
+                ))
+                if alt_preview_text then
+                    alternate_text = alt_preview_text
+                end
+            elseif preview_alt then
+                alternate_text = preview_alt
             end
-        elseif preview_alt then
-            alternate_text = preview_alt
+        end
+
+        local comment = cand.comment or ""
+        if preview_chunk and preview_matched then
+            comment = comment .. "〔半码预览〕"
+        end
+
+        local function make_candidate(text_value, quality_offset)
+            if not text_value or text_value == "" then
+                return nil
+            end
+            if text_value == cand.text and quality_offset and quality_offset < 0 then
+                return nil
+            end
+
+            local fixed_cand = Candidate(cand.type, cand.start, cand._end, text_value, comment)
+            if cand.quality ~= nil then
+                fixed_cand.quality = cand.quality + (quality_offset or 0)
+            end
+            fixed_cand.preedit = cand.preedit
+            return fixed_cand
+        end
+
+        local primary = make_candidate(current_text, 0)
+        local secondary = nil
+        if alternate_text and alternate_text ~= current_text then
+            secondary = make_candidate(alternate_text, -0.001)
+        end
+
+        return primary, secondary, {
+            stable_text = stable_text,
+            primary_text = current_text,
+            completed_count = #completed_chunks,
+            last_match_pos = bound_positions[#bound_positions] or 0,
+            bound_positions = bound_positions,
+            has_preview = preview_chunk ~= nil,
+        }
+    end
+
+    local primary, secondary, meta = run_with_locked_count(saved_count)
+    if primary then
+        return primary, secondary, meta
+    end
+
+    for locked_count = saved_count - 1, 0, -1 do
+        primary, secondary, meta = run_with_locked_count(locked_count)
+        if primary then
+            return primary, secondary, meta
         end
     end
 
-    if match_count ~= #completed_chunks then
-        return nil
-    end
-
-    local comment = cand.comment or ""
-    if preview_chunk and preview_matched then
-        comment = comment .. "〔半码预览〕"
-    end
-
-    local function make_candidate(text, quality_offset)
-        if not text or text == "" then
-            return nil
-        end
-        if text == cand.text and quality_offset and quality_offset < 0 then
-            return nil
-        end
-
-        local fixed_cand = Candidate(cand.type, cand.start, cand._end, text, comment)
-        if cand.quality ~= nil then
-            fixed_cand.quality = cand.quality + (quality_offset or 0)
-        end
-        fixed_cand.preedit = cand.preedit
-        return fixed_cand
-    end
-
-    local primary = make_candidate(current_text, 0)
-    local secondary = nil
-    if alternate_text and alternate_text ~= current_text then
-        secondary = make_candidate(alternate_text, -0.001)
-    end
-
-    return primary, secondary
+    return nil
 end
 
--- 判断声调是否匹配通过；数据库声调不足时直接借用注释码，不再创建嵌套声调表。
 local function check_explicit_tone_match(codes_seq, tone_filter_seq, comment_internal, source_type)
     if #tone_filter_seq > #codes_seq then
         return false
@@ -1786,7 +2860,6 @@ local function check_explicit_tone_match(codes_seq, tone_filter_seq, comment_int
     return true
 end
 
--- 综合匹配判断引擎 (引导模式使用)
 local function check_explicit_match(raw_data, cand_len, clean_fuma, tone_filter_seq, apply_tone_filter, env)
     for _, source_type in ipairs(env.data_sources) do
         local codes_seq = raw_data[source_type]
@@ -1816,7 +2889,6 @@ local function check_explicit_match(raw_data, cand_len, clean_fuma, tone_filter_
     return false
 end
 
--- 7. 动态引擎逻辑判定提取 (动态模式使用)
 local function check_direct_match(raw_data, cand_len, clean_fuma, data_sources)
     for _, source_type in ipairs(data_sources) do
         local codes_seq = raw_data[source_type]
@@ -1879,9 +2951,59 @@ local function create_direct_candidate(cand, ctx_input, pure_code, fuma)
     return ext_cand
 end
 
--- 8. 模式分发调度控制器 (主干函数)
+local function get_explicit_progress_seed(env, pure_code, explicitly_fuma, cand, cand_len, syl_offset)
+    local progress = env._explicit_progress
+    if not progress or not progress.stable_text then
+        return nil
+    end
 
--- A. 引导模式 (Explicit Mode) 控制器
+    if progress.pure_code ~= pure_code
+        or progress.base_text ~= cand.text
+        or progress.cand_len ~= cand_len
+        or progress.cand_start ~= cand.start
+        or progress.cand_end ~= cand._end
+        or progress.syl_offset ~= syl_offset
+    then
+        return nil
+    end
+
+    local previous_fuma = progress.fuma or ""
+    if explicitly_fuma == previous_fuma then
+        return progress
+    end
+
+    if #explicitly_fuma > #previous_fuma
+        and explicitly_fuma:sub(1, #previous_fuma) == previous_fuma
+    then
+        return progress
+    end
+
+    return nil
+end
+
+local function save_explicit_progress(env, pure_code, explicitly_fuma, cand, cand_len, syl_offset, meta)
+    if not meta or not meta.stable_text then
+        env._explicit_progress = nil
+        return
+    end
+
+    env._explicit_progress = {
+        pure_code = pure_code,
+        fuma = explicitly_fuma,
+        base_text = cand.text,
+        cand_len = cand_len,
+        cand_start = cand.start,
+        cand_end = cand._end,
+        syl_offset = syl_offset,
+        stable_text = meta.stable_text,
+        primary_text = meta.primary_text,
+        completed_count = meta.completed_count or 0,
+        last_match_pos = meta.last_match_pos or 0,
+        bound_positions = copy_number_list(meta.bound_positions or {}),
+        has_preview = meta.has_preview == true,
+    }
+end
+
 local function handle_explicit_mode(input, env, ctx_input, pure_code, explicitly_fuma, s_end)
     ensure_lookup_resources(env)
 
@@ -1909,7 +3031,6 @@ local function handle_explicit_mode(input, env, ctx_input, pure_code, explicitly
     local has_any_match = false
     local is_first_cand = true
 
-    -- 获取输入音节片段；历史切分只读不改，直接复用原表。
     local syllables
     if pure_code == env.history_input and env.history_parts and #env.history_parts > 0 then
         syllables = env.history_parts
@@ -1920,7 +3041,6 @@ local function handle_explicit_mode(input, env, ctx_input, pure_code, explicitly
     for cand in input:iter() do
         local cand_len = get_utf8_len(cand.text)
 
-        -- 首个候选修正：纯声调翻译与多字纠错
         if is_first_cand then
             is_first_cand = false
             local syl_offset = get_syl_offset(cand, ctx)
@@ -1939,19 +3059,65 @@ local function handle_explicit_mode(input, env, ctx_input, pure_code, explicitly
                 ((cand.type == "sentence" and cand_len > 1) or (cand.type == "phrase" and cand_len > 3))
                 and #syllables >= (cand_len + syl_offset)
             then
-                local corr_cand, corr_cand2 =
-                    attempt_phrase_correction(cand, cand_len, env, syllables, fuma_chunks, syl_offset)
+                local seed_progress = get_explicit_progress_seed(
+                    env,
+                    pure_code,
+                    explicitly_fuma,
+                    cand,
+                    cand_len,
+                    syl_offset
+                )
+
+                local corr_cand, corr_cand2, progress_meta =
+                    attempt_phrase_correction(
+                        cand,
+                        cand_len,
+                        env,
+                        syllables,
+                        fuma_chunks,
+                        syl_offset,
+                        seed_progress
+                    )
+
+                local has_bound_prefix = seed_progress
+                    and (tonumber(seed_progress.completed_count) or 0) > 0
+                    and seed_progress.bound_positions
+                    and #seed_progress.bound_positions > 0
+
+                if not corr_cand and seed_progress and not has_bound_prefix then
+                    corr_cand, corr_cand2, progress_meta =
+                        attempt_phrase_correction(
+                            cand,
+                            cand_len,
+                            env,
+                            syllables,
+                            fuma_chunks,
+                            syl_offset,
+                            nil
+                        )
+                end
+
                 if corr_cand then
+                    save_explicit_progress(
+                        env,
+                        pure_code,
+                        explicitly_fuma,
+                        cand,
+                        cand_len,
+                        syl_offset,
+                        progress_meta
+                    )
                     yield(corr_cand)
                     if corr_cand2 and corr_cand2.text ~= corr_cand.text then
                         yield(corr_cand2)
                     end
                     goto skip
+                else
+                    env._explicit_progress = nil
                 end
             end
         end
 
-        -- 数据校验与匹配判定
         if cand.type == "sentence" or not cand_len or cand_len == 0 then
             goto skip
         end
@@ -1981,7 +3147,6 @@ local function handle_explicit_mode(input, env, ctx_input, pure_code, explicitly
         ::skip::
     end
 
-    -- 输出匹配结果 (依单字优先策略不同排序输出)
     if if_single_char_first then
         if buckets[1] then
             for _, c in ipairs(buckets[1]) do
@@ -2009,7 +3174,6 @@ local function handle_explicit_mode(input, env, ctx_input, pure_code, explicitly
         yield(c)
     end
 
-    -- 兜底：如果完全没有匹配且包含声调过滤，则生成影候选
     if not has_any_match and apply_tone_filter and #clean_fuma > 0 and env.has_db and env.db_table then
         local fallback_fuma_list = get_fuma_probe_variants(env, clean_fuma)
         for _, db_obj in ipairs(env.db_table) do
@@ -2027,7 +3191,6 @@ local function handle_explicit_mode(input, env, ctx_input, pure_code, explicitly
     end
 end
 
--- B. 动态直辅模式 (direct Mode) 控制器
 local function snapshot_direct_candidate(cand)
     return {
         type = cand.type,
@@ -2127,18 +3290,15 @@ local function handle_direct_mode(input, env, ctx_input)
         if not first_seen then
             first_seen = true
 
-            -- 第一位辅码只有在当前首选由两字变成三字时才启动。
             if follows_base and extra_len == 1 and direct_cache and not direct_cache.active and cand_len == 3 then
                 direct_cache.active = true
                 mode = "lookup"
                 build_matches()
 
-            -- 已经启动后，允许继续输入第二位辅码；保持原双码功能。
             elseif follows_base and extra_len >= 1 and extra_len <= 2 and direct_cache and direct_cache.active then
                 mode = "lookup"
                 build_matches()
 
-            -- 首选两字且完整吃码：建立下一轮直辅缓存。
             elseif cand_len == 2 and cand._end == #ctx_input then
                 mode = "cache"
                 cache_candidates = {}
@@ -2204,13 +3364,11 @@ local function handle_direct_mode(input, env, ctx_input)
     end
 end
 
--- 9. Rime 暴露接口 (Init / Func / Fini)
 local f = {}
 
 function f.init(env)
     local config = env.engine.schema.config
 
-    -- 仅从 __patch 合并后的最终 speller/algebra 自动读取实际并键规则。
     local merge_enabled, forward_map, reverse_map, merge_source, merge_target, merge_mode =
         detect_key_merge_from_algebra(config)
     env.key_merge_enabled = merge_enabled
@@ -2219,7 +3377,6 @@ function f.init(env)
     env.key_merge_source = merge_source
     env.key_merge_target = merge_target
     env.key_merge_mode = merge_mode
-
 
     env.enable_tone = config:get_bool("wanxiang_lookup/enable_tone")
     if env.enable_tone == nil then
@@ -2314,9 +3471,11 @@ function f.init(env)
         local edit = select(1, split_lookup_input(preedit_text, env.reverse_key, env.bypass_prefix))
         if edit and edit:match("[%w/]") then
             ctx.input = no_search_string .. env.reverse_key
+            env._explicit_progress = nil
         else
             ctx.input = no_search_string
             ctx:commit()
+            env._explicit_progress = nil
             clear_match_caches(env)
         end
     end)
@@ -2325,16 +3484,16 @@ function f.init(env)
     env._comment_cache = {}
     env.cache_size = 0
     env.direct_cache = nil
+    env._explicit_progress = nil
     clear_match_caches(env)
-    -- 双轨缓存系统
     env.history_parts = {}
     env.history_input = ""
-    -- 专为引导模式(Explicit)的监听器，用于在敲击反查引导符前，保留完美的拼音切分案底
     env.update_conn = env.engine.context.update_notifier:connect(function(ctx)
         if not ctx:is_composing() then
             env.history_parts = {}
             env.history_input = ""
             env.direct_cache = nil
+            env._explicit_progress = nil
             clear_match_caches(env)
             return
         end
@@ -2386,7 +3545,7 @@ function f.func(input, env)
 
     if s_start then
         if not explicitly_fuma or #explicitly_fuma == 0 then
-            -- 只输入反查引导符时原样透传，不创建整候选 raw_data 预热表。
+            env._explicit_progress = nil
             for cand in input:iter() do
                 yield(cand)
             end
@@ -2394,6 +3553,7 @@ function f.func(input, env)
         end
         return handle_explicit_mode(input, env, ctx_input, pure_code, explicitly_fuma, s_end)
     else
+        env._explicit_progress = nil
         if not env.enable_direct or wanxiang.is_pro_scheme(env) then
             env.direct_cache = nil
             for cand in input:iter() do
@@ -2427,6 +3587,7 @@ function f.fini(env)
     env._local_query_cache = nil
     env.history_parts = nil
     env.direct_cache = nil
+    env._explicit_progress = nil
 
     collectgarbage("collect")
 end

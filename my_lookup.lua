@@ -1838,7 +1838,7 @@ local function try_match_single_chars_with_release(
         end
 
         local is_active_chunk = is_active_chunk_spec(active_chunk_index, chunk_idx)
-        local prefer_change = is_active_chunk and current_start > 1
+        local prefer_change = is_active_chunk
 
         for pos = current_start, max_pos do
             local position_matches = collect_release_position_matches(
@@ -1972,7 +1972,7 @@ local function try_match_single_chars(
                         end
                     end
                 else
-                    local prefer_replacement = current_start > 1
+                    local prefer_replacement = is_active_chunk
                     if best_item and (not is_orig_valid or prefer_replacement) then
                         matched_char = best_item.char
                         matched_weight = best_item.weight or -math.huge
@@ -2056,7 +2056,7 @@ local function try_match_single_chars(
                     end
 
                     if #same_position_matches > 0 then
-                        local prefer_change = current_start > 1
+                        local prefer_change = is_active_chunk
                         table.sort(same_position_matches, function(a, b)
                             return is_better_same_position_match(a, b, prefer_change)
                         end)
@@ -2096,7 +2096,6 @@ local function try_match_single_chars(
 
                 if is_active_chunk
                     and leftmost_match
-                    and current_start > 1
                     and i > leftmost_match.pos
                 then
                     local remaining_ok = can_match_remaining_chunks(
@@ -2137,7 +2136,7 @@ local function try_match_single_chars(
                                 and override_distance_allowed(
                                     leftmost_match,
                                     rescue_match,
-                                    current_start > 1
+                                    is_active_chunk
                                 )
                                 and rescue_match.replacement_support >= (leftmost_match.replacement_support or 0)
                                 and (
@@ -2165,7 +2164,7 @@ local function try_match_single_chars(
             and should_override_leftmost_match(
                 leftmost_match,
                 best_context_match,
-                current_start > 1
+                is_active_chunk
             )
             and can_match_remaining_chunks(
                 chars,

@@ -1638,7 +1638,9 @@ end
 
 
 local RELEASE_BACKTRACK_MAX_STATES = 768
+local RELEASE_REPAIR_MAX_STATES = 4096
 local RELEASE_BACKTRACK_MAX_RESULTS = 2
+local RELEASE_REPAIR_MAX_RESULTS = 48
 local RELEASE_BACKTRACK_CANDIDATES_PER_POSITION = 6
 
 local function copy_char_list(chars)
@@ -1774,6 +1776,101 @@ local function has_preview_match_from(
     return false
 end
 
+-- 为解除的旧锁定构造“离旧位置最近”的搜索顺序。
+-- 例如旧位置在 5，新辅码要求旧辅码必须移到 4 之前时，顺序为 5、4、6、3、7、2……，
+-- 因而会优先选择满足整组顺序约束的最小位移位置，而不是直接回到句首。
+local function build_repair_position_order(first_pos, max_pos, anchor_pos)
+    local positions = {}
+    if first_pos > max_pos then
+        return positions
+    end
+
+    if not anchor_pos then
+        for pos = first_pos, max_pos do
+            positions[#positions + 1] = pos
+        end
+        return positions
+    end
+
+    local center = math.max(first_pos, math.min(anchor_pos, max_pos))
+    local max_distance = math.max(center - first_pos, max_pos - center)
+
+    for distance = 0, max_distance do
+        local left = center - distance
+        if left >= first_pos and left <= max_pos then
+            positions[#positions + 1] = left
+        end
+
+        if distance > 0 then
+            local right = center + distance
+            if right >= first_pos and right <= max_pos then
+                positions[#positions + 1] = right
+            end
+        end
+    end
+
+    return positions
+end
+
+local function copy_release_score(score)
+    return {
+        anchor_shift = score.anchor_shift or 0,
+        anchor_max_shift = score.anchor_max_shift or 0,
+        context_score = score.context_score or 0,
+        phrase_damage = score.phrase_damage or 0,
+        replacement_support = score.replacement_support or 0,
+        weight = score.weight or 0,
+        change_count = score.change_count or 0,
+    }
+end
+
+local function is_better_release_result(a, b, released_prefix_count)
+    if not b then
+        return true
+    end
+
+    local sa = a.score or {}
+    local sb = b.score or {}
+
+    -- 第一优先级：旧辅码尽可能少移动，避免解除锁定后回到句首破坏正常前缀。
+    if (sa.anchor_shift or 0) ~= (sb.anchor_shift or 0) then
+        return (sa.anchor_shift or 0) < (sb.anchor_shift or 0)
+    end
+    if (sa.anchor_max_shift or 0) ~= (sb.anchor_max_shift or 0) then
+        return (sa.anchor_max_shift or 0) < (sb.anchor_max_shift or 0)
+    end
+
+    -- 第二优先级：减少对已有二字/三字词的破坏。
+    if (sa.phrase_damage or 0) ~= (sb.phrase_damage or 0) then
+        return (sa.phrase_damage or 0) < (sb.phrase_damage or 0)
+    end
+    if (sa.context_score or 0) ~= (sb.context_score or 0) then
+        return (sa.context_score or 0) > (sb.context_score or 0)
+    end
+    if (sa.replacement_support or 0) ~= (sb.replacement_support or 0) then
+        return (sa.replacement_support or 0) > (sb.replacement_support or 0)
+    end
+
+    -- 完整辅码通常表示用户确实希望发生修改；在其他条件相同时优先真实替换。
+    if (sa.change_count or 0) ~= (sb.change_count or 0) then
+        return (sa.change_count or 0) > (sb.change_count or 0)
+    end
+    if (sa.weight or 0) ~= (sb.weight or 0) then
+        return (sa.weight or 0) > (sb.weight or 0)
+    end
+
+    -- 最后仍优先让被释放的旧辅码靠后，进一步保护句首正常词组。
+    for i = 1, released_prefix_count or 0 do
+        local pa = (a.positions or {})[i] or 0
+        local pb = (b.positions or {})[i] or 0
+        if pa ~= pb then
+            return pa > pb
+        end
+    end
+
+    return tostring(a.text or "") < tostring(b.text or "")
+end
+
 local function try_match_single_chars_with_release(
     current_text,
     search_start_idx,
@@ -1783,7 +1880,9 @@ local function try_match_single_chars_with_release(
     syl_offset,
     match_count,
     active_chunk_index,
-    required_preview_chunk
+    required_preview_chunk,
+    released_prefix_count,
+    released_anchor_positions
 )
     local base_chars = text_to_chars(current_text)
     local first_pos = math.max(search_start_idx or 1, 1)
@@ -1792,7 +1891,19 @@ local function try_match_single_chars_with_release(
     local explored_states = 0
     local context_cache = {}
 
-    local function add_result(chars, next_start, positions)
+    released_prefix_count = math.max(
+        0,
+        math.min(tonumber(released_prefix_count) or 0, #fuma_chunks)
+    )
+    released_anchor_positions = released_anchor_positions or {}
+
+    local repair_mode = released_prefix_count > 0
+    local state_limit = repair_mode and RELEASE_REPAIR_MAX_STATES
+        or RELEASE_BACKTRACK_MAX_STATES
+    local result_limit = repair_mode and RELEASE_REPAIR_MAX_RESULTS
+        or RELEASE_BACKTRACK_MAX_RESULTS
+
+    local function add_result(chars, next_start, positions, score)
         local text_value = chars_to_text(chars)
         local pos_key = table.concat(positions or {}, ",")
         local result_key = text_value .. "\31" .. pos_key
@@ -1800,17 +1911,29 @@ local function try_match_single_chars_with_release(
             return
         end
         seen_texts[result_key] = true
+
         results[#results + 1] = {
             text = text_value,
             next_start = next_start,
             positions = copy_number_list(positions),
+            score = copy_release_score(score or {}),
         }
+
+        if repair_mode then
+            table.sort(results, function(a, b)
+                return is_better_release_result(a, b, released_prefix_count)
+            end)
+            while #results > result_limit do
+                table.remove(results)
+            end
+        end
     end
 
-    local function dfs(chars, chunk_idx, current_start, positions)
-        if #results >= RELEASE_BACKTRACK_MAX_RESULTS
-            or explored_states >= RELEASE_BACKTRACK_MAX_STATES
-        then
+    local function dfs(chars, chunk_idx, current_start, positions, score)
+        if explored_states >= state_limit then
+            return
+        end
+        if not repair_mode and #results >= result_limit then
             return
         end
 
@@ -1825,7 +1948,7 @@ local function try_match_single_chars_with_release(
                 syllables,
                 syl_offset
             ) then
-                add_result(chars, current_start, positions)
+                add_result(chars, current_start, positions, score)
             end
             return
         end
@@ -1839,8 +1962,18 @@ local function try_match_single_chars_with_release(
 
         local is_active_chunk = is_active_chunk_spec(active_chunk_index, chunk_idx)
         local prefer_change = is_active_chunk
+        local anchor_pos = nil
+        if chunk_idx <= released_prefix_count then
+            anchor_pos = tonumber(released_anchor_positions[chunk_idx])
+        end
 
-        for pos = current_start, max_pos do
+        local position_order = build_repair_position_order(
+            current_start,
+            max_pos,
+            anchor_pos
+        )
+
+        for _, pos in ipairs(position_order) do
             local position_matches = collect_release_position_matches(
                 chars,
                 pos,
@@ -1869,22 +2002,72 @@ local function try_match_single_chars_with_release(
                 then
                     local next_positions = copy_number_list(positions)
                     next_positions[#next_positions + 1] = pos
-                    dfs(next_chars, chunk_idx + 1, pos + 1, next_positions)
+
+                    local next_score = copy_release_score(score or {})
+                    if anchor_pos then
+                        local shift = math.abs(pos - anchor_pos)
+                        next_score.anchor_shift = next_score.anchor_shift + shift
+                        next_score.anchor_max_shift = math.max(
+                            next_score.anchor_max_shift,
+                            shift
+                        )
+                    end
+
+                    local original_support = match.original_support or 0
+                    local replacement_support = match.replacement_support or 0
+                    next_score.phrase_damage = next_score.phrase_damage
+                        + math.max(0, original_support - replacement_support)
+                    next_score.context_score = next_score.context_score
+                        + (match.context_score or 0)
+                    next_score.replacement_support = next_score.replacement_support
+                        + replacement_support
+
+                    local match_weight = match.weight or -math.huge
+                    if match_weight == -math.huge then
+                        match_weight = -1000000000
+                    end
+                    next_score.weight = next_score.weight + match_weight
+                    if match.is_change then
+                        next_score.change_count = next_score.change_count + 1
+                    end
+
+                    dfs(
+                        next_chars,
+                        chunk_idx + 1,
+                        pos + 1,
+                        next_positions,
+                        next_score
+                    )
                 end
 
-                if #results >= RELEASE_BACKTRACK_MAX_RESULTS
-                    or explored_states >= RELEASE_BACKTRACK_MAX_STATES
-                then
+                if explored_states >= state_limit then
+                    return
+                end
+                if not repair_mode and #results >= result_limit then
                     return
                 end
             end
         end
     end
 
-    dfs(base_chars, 1, first_pos, {})
+    dfs(base_chars, 1, first_pos, {}, {
+        anchor_shift = 0,
+        anchor_max_shift = 0,
+        context_score = 0,
+        phrase_damage = 0,
+        replacement_support = 0,
+        weight = 0,
+        change_count = 0,
+    })
 
     if #results == 0 then
         return nil
+    end
+
+    if repair_mode then
+        table.sort(results, function(a, b)
+            return is_better_release_result(a, b, released_prefix_count)
+        end)
     end
 
     local primary = results[1]
@@ -2558,6 +2741,11 @@ local function attempt_phrase_correction(cand, cand_len, env, syllables, fuma_ch
 
     local completed_chunks, preview_chunk = split_fuma_chunks_for_preview(fuma_chunks)
     local saved_positions = {}
+    -- raw_saved_count：上一轮实际保存了多少个已完成辅码块。
+    -- saved_count：其中有多少个辅码块在本轮仍可直接复用。
+    -- 当 AB 变成 AB7 时，saved_count 会降为 0，但 raw_saved_count 仍为 1，
+    -- 从而保留旧位置作为软锚点进入受约束修复，而不是退回普通句首贪心匹配。
+    local raw_saved_count = 0
     local saved_count = 0
     local saved_text = nil
 
@@ -2573,10 +2761,34 @@ local function attempt_phrase_correction(cand, cand_len, env, syllables, fuma_ch
                 saved_positions[#saved_positions + 1] = n
             end
         end
-        saved_count = math.min(
+        -- 进度只能复用到“辅码块内容完全不变”的公共前缀。
+        -- 例如旧输入为 AB，新输入为 AB7 时，虽然只是追加了声调，
+        -- 但第一个辅码块已经由 AB 变成 AB7，必须解除该位置的旧锁定并重新匹配，
+        -- 否则原来误锁定的字（如“础”）不会再经过声调 7 的校验。
+        local reusable_chunk_count = #completed_chunks
+        if seed_progress.fuma and seed_progress.fuma ~= "" then
+            local _, _, previous_fuma_chunks = parse_fuma_rules(seed_progress.fuma)
+            local previous_completed_chunks = select(1, split_fuma_chunks_for_preview(previous_fuma_chunks))
+            reusable_chunk_count = 0
+
+            local common_limit = math.min(#previous_completed_chunks, #completed_chunks)
+            for i = 1, common_limit do
+                if previous_completed_chunks[i] ~= completed_chunks[i] then
+                    break
+                end
+                reusable_chunk_count = i
+            end
+        end
+
+        raw_saved_count = math.min(
             tonumber(seed_progress.completed_count) or #saved_positions,
             #saved_positions,
             #completed_chunks
+        )
+
+        saved_count = math.min(
+            raw_saved_count,
+            reusable_chunk_count
         )
     end
 
@@ -2597,9 +2809,23 @@ local function attempt_phrase_correction(cand, cand_len, env, syllables, fuma_ch
             remaining_chunks[#remaining_chunks + 1] = completed_chunks[i]
         end
 
-        local released_history = locked_count < saved_count
-        local active_remaining_chunk_index
+        -- 是否存在“上一轮已锁定、但本轮不能直接复用”的块。
+        -- 这里必须与 raw_saved_count 比较，而不是与 saved_count 比较。
+        -- 例如 AB -> AB7：locked_count=0、saved_count=0、raw_saved_count=1。
+        -- 若仍用 saved_count，程序会误判为没有释放历史，从句首选择最左匹配“析→兮”；
+        -- 使用 raw_saved_count 后，会携带旧位置“础”作为软锚点，优先选择更近且不破词的“宝→包”。
+        local released_history = locked_count < raw_saved_count
+        local released_prefix_count = released_history
+            and math.min(raw_saved_count - locked_count, #remaining_chunks)
+            or 0
+        local released_anchor_positions = {}
+        if released_history then
+            for i = 1, released_prefix_count do
+                released_anchor_positions[i] = saved_positions[locked_count + i]
+            end
+        end
 
+        local active_remaining_chunk_index
         if released_history then
             active_remaining_chunk_index = {}
             for i = 1, #remaining_chunks do
@@ -2620,17 +2846,34 @@ local function attempt_phrase_correction(cand, cand_len, env, syllables, fuma_ch
             local new_match_count = 0
 
             if released_history then
-                current_text, new_match_count, search_start_idx, alternate_text, new_positions =
-                    match_chunk_group(
+                -- 旧锁定需要释放时，不再从句首取第一个可行解。
+                -- 使用旧绑定位置作为软锚点，选择位移最小且不破坏正常前缀的整组解。
+                local repair_text,
+                    repair_count,
+                    repair_next,
+                    repair_alternate,
+                    repair_positions =
+                    try_match_single_chars_with_release(
                         current_text,
                         search_start_idx,
-                        cand_len,
                         env,
                         syllables,
                         remaining_chunks,
                         syl_offset,
-                        active_remaining_chunk_index
+                        0,
+                        active_remaining_chunk_index,
+                        nil,
+                        released_prefix_count,
+                        released_anchor_positions
                     )
+
+                if repair_text then
+                    current_text = repair_text
+                    new_match_count = repair_count or 0
+                    search_start_idx = repair_next or search_start_idx
+                    alternate_text = repair_alternate
+                    new_positions = repair_positions or {}
+                end
             else
                 local new_text, count, next_start, second_text, positions =
                     try_match_long_phrase(
@@ -2738,7 +2981,9 @@ local function attempt_phrase_correction(cand, cand_len, env, syllables, fuma_ch
                         syl_offset,
                         0,
                         all_active,
-                        preview_chunk
+                        preview_chunk,
+                        released_prefix_count,
+                        released_anchor_positions
                     )
 
                 if constrained_text
